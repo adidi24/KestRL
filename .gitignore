@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+
+# uv / build
+.venv
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+.*/
+!.github/ 
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+
+# Secrets
+.env
+
+# Experiment outputs
+runs/
+videos/
+wandb/
+checkpoints/
+
+# Hydra
+outputs/
+multirun/
+
+benchrl/

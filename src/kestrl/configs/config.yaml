@@ -1,0 +1,5 @@
+defaults:
+  - environment: mujoco
+  - experiment: base
+  - algorithm: sac_mujoco
+  - _self_

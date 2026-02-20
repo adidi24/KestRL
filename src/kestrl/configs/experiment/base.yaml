@@ -1,0 +1,9 @@
+seed: 1
+track: true
+capture_video: false
+video_folder: null
+eval_interval: null
+eval_episodes: 10
+checkpoint_dir: checkpoints
+checkpoint_interval: 100000
+max_checkpoints: 4

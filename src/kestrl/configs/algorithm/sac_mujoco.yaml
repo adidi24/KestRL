@@ -1,0 +1,33 @@
+_target_: kestrl.algorithms.sac.SAC
+name: sac
+
+# Network architecture — _partial_=True in _build_networks() injects obs_dim/action_dim/rngs
+actor_network:
+  _target_: kestrl.networks.MultiHeadMLP
+  hidden_dims: [256, 256]
+  activation: relu
+
+critic_network:
+  _target_: kestrl.networks.MLP
+  hidden_dims: [256, 256]
+  activation: relu
+
+# Core hyperparameters
+total_timesteps: 1000000
+buffer_size: 1000000
+learning_starts: 5000
+batch_size: 256
+train_freq: 1
+target_update_interval: 1
+policy_frequency: 2
+gamma: 0.99
+tau: 0.005
+
+# Learning rates
+lr_actor: 3e-4
+lr_critic: 1e-3
+lr_alpha: 3e-4
+
+# Entropy
+autotune_alpha: true
+alpha: 0.2 # used only when autotune_alpha=false
