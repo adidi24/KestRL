@@ -5,28 +5,6 @@ checkpointing) and adds a BlockPosterior over actor parameters that is
 optimised via a PAC-Bayes bound on policy generalisation.
 
 Algorithm (Algorithm 1 of the paper):
-
-  Each env step:
-    1. Collect experience with posterior-guided UCB exploration.
-    2. Standard SAC critic + actor update.
-    3. Sync: posterior_mean ← current actor weights.
-    4. Every pb_update_freq steps:
-         a. Collect pb_rollout_trajectories fresh trajectories.
-         b. Estimate τ_min from reward autocorrelation.
-         c. Split 90/10 train/test.
-         d. For pb_update_epochs epochs:
-              - Sample M policies from the posterior.
-              - Evaluate via importance sampling on training trajectories.
-              - REINFORCE gradient on (posterior.mean, posterior.std, posterior.P).
-              - Analytically update λ* = sqrt(C · KL + C').
-         e. Compute certified bound on test trajectories and log.
-         f. Inject: actor ← posterior_mean; freeze actor.
-    5. Critic adaptation phase (actor frozen):
-         - Average TD targets over adaptation_samples posterior samples.
-         - Unfreeze after actor_freeze_steps.
-    6. Every pb_reset_prior_freq steps:
-         - EMA update of prior: μ₀ ← ι·υ + (1-ι)·μ₀.
-
 Paper: https://arxiv.org/abs/2510.10544
 Reference implementation: src/benchrl/algorithms/pbsac.py
 """
@@ -59,9 +37,8 @@ from kestrl.algorithms.functions.pbsac_updates import (
 )
 from kestrl.algorithms.functions.pbsac_losses import (
     compute_pac_bayes_bound,
-    compute_posterior_guided_targets,
-    get_continuous_actor_action_from_posterior,
-    get_discrete_actor_action_from_posterior
+    compute_posterior_guided_targets_vmap,
+    get_actor_action_from_posterior_vmap,
 )
 from kestrl.distributions import (
     BlockPosterior,
@@ -385,27 +362,15 @@ class PBSAC(SAC):
 
     def get_action(self, obs: jax.Array, *, deterministic: bool = False) -> jax.Array:
         """Select an action, optionally using posterior-guided UCB exploration."""
-        key = self._next_key()
-
-        if self.is_discrete:
-            if deterministic:
-                return jnp.argmax(self.actor(obs), axis=-1), None, None
-            return get_discrete_actor_action_from_posterior(
-                self.posterior, self.actor, self.critic1, self.critic2,
-                obs, self.explore_prob, self.explore_n_samples, key,
-            )
-
-        if deterministic:
-            logits = self.actor(obs)
-            mean = jnp.tanh(logits['mean']) * self.action_scale + self.action_bias
-            return mean, None, None
-
-        return get_continuous_actor_action_from_posterior(
+        key, decision_key = jax.random.split(self._next_key())
+        should_explore = bool(jax.random.uniform(decision_key) < self.explore_prob) and not deterministic
+        
+        return get_actor_action_from_posterior_vmap(
             self.posterior, self.actor, self.critic1, self.critic2,
             obs, self.action_scale, self.action_bias,
-            self.explore_prob, self.explore_n_samples, key,
+            should_explore, self.explore_n_samples, self.is_discrete, deterministic, key
         )
-
+        
     def train_step(self) -> dict[str, float]:
         """One PB-SAC training step."""
         metrics = {}
@@ -428,7 +393,7 @@ class PBSAC(SAC):
         key  = self._next_key()
 
         if self.actor_frozen:
-            target_q = compute_posterior_guided_targets(
+            target_q = compute_posterior_guided_targets_vmap(
                 self.posterior, self.actor,
                 self.target_critic1, self.target_critic2, self.log_alpha,
                 data.next_observations, data.rewards, data.dones,
