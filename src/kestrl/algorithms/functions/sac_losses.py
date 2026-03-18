@@ -1,4 +1,4 @@
-"""Pure loss functions for SAC — shared by SAC and PBSAC.
+"""Pure loss functions for SAC.
 
 All functions are pure (no side effects), JIT-compatible.
 They take network state + data → return (loss, metrics).
@@ -162,3 +162,38 @@ def get_discrete_actor_action(
     action_probs = policy_dist.probs
     log_prob = jax.nn.log_softmax(logits, axis=1)
     return action, log_prob, action_probs
+
+# ── Get log probability ────────────────────────────────
+def get_continuous_action_log_prob(
+    actor: nnx.Module,
+    obs: jax.Array,
+    action: jax.Array,
+    action_scale: jax.Array,
+    action_bias: jax.Array,
+) -> jax.Array:
+    
+    logits = actor(obs)
+    mean = logits["mean"]
+    log_std = jnp.clip(logits["log_std"], LOG_STD_MIN, LOG_STD_MAX) # important
+    std = jnp.exp(log_std)
+    normal = Normal(mean, std)
+    
+    unscaled_action = (action - action_bias) / action_scale
+    unscaled_action = jnp.clip(unscaled_action, -1.0 + 1e-6, 1.0 - 1e-6)
+    raw_action = jnp.atanh(unscaled_action)
+    
+    log_prob = normal.log_prob(raw_action)
+    log_prob -= jnp.log(action_scale * (1 - unscaled_action ** 2) + 1e-6)
+    log_prob = jnp.sum(log_prob, axis=1, keepdims=True)
+    return log_prob
+
+def get_discrete_action_log_prob(
+    actor: nnx.Module,
+    obs: jax.Array,
+    action: jax.Array,
+) -> jax.Array:
+    
+    logits = actor(obs)
+    policy_dist = Categorical(logits=logits)
+    log_prob = policy_dist.log_prob(action)
+    return log_prob

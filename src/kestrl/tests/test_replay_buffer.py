@@ -35,7 +35,7 @@ def add_transitions(buf, n, obs_dim=4, act_dim=1):
         action = np.random.randn(act_dim).astype(np.float32)
         reward = np.random.randn(1).astype(np.float32)
         done = np.array([0.0], dtype=np.float32)
-        infos = [{}]
+        infos = {}
         buf.add(obs, next_obs, action, reward, done, infos)
 
 
@@ -79,7 +79,7 @@ def test_add_stores_data():
     action = np.array([0.5], dtype=np.float32)
     reward = np.array([1.0], dtype=np.float32)
     done = np.array([0.0], dtype=np.float32)
-    buf.add(obs, next_obs, action, reward, done, [{}])
+    buf.add(obs, next_obs, action, reward, done, {})
     
     np.testing.assert_array_equal(buf.observations[0, 0], obs)
     np.testing.assert_array_equal(buf.next_observations[0, 0], next_obs)
@@ -132,7 +132,7 @@ def test_sample_discrete_actions():
         action = np.array([np.random.randint(2)], dtype=np.int64)
         reward = np.array([1.0], dtype=np.float32)
         done = np.array([0.0], dtype=np.float32)
-        buf.add(obs, next_obs, action, reward, done, [{}])
+        buf.add(obs, next_obs, action, reward, done, {})
     
     batch = buf.sample(8)
     obs, actions, next_obs, dones, rewards = batch
@@ -162,10 +162,10 @@ def test_timeout_masking():
     
     # Add a transition that's done due to timeout
     buf.add(obs, next_obs, action, np.array([1.0]), np.array([1.0]),
-            [{"TimeLimit.truncated": True}])
+            {"TimeLimit.truncated": np.array([True], dtype=bool)})
     # Add a transition that's done NOT due to timeout
     buf.add(obs, next_obs, action, np.array([1.0]), np.array([1.0]),
-            [{"TimeLimit.truncated": False}])
+            {"TimeLimit.truncated": np.array([False], dtype=bool)})
     
     # Sample all and check: timeout done should be masked to 0
     assert buf.timeouts[0, 0] == 1.0  # timeout flagged
@@ -179,7 +179,7 @@ def test_no_timeout_handling():
     
     obs = np.zeros(4, dtype=np.float32)
     buf.add(obs, obs, np.zeros(1), np.array([1.0]), np.array([1.0]),
-            [{"TimeLimit.truncated": True}])
+            {"TimeLimit.truncated": np.array([True], dtype=bool)})
     assert buf.timeouts[0, 0] == 0.0  # should NOT be recorded
 
 

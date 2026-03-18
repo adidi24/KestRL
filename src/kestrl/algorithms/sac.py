@@ -28,11 +28,11 @@ import optax
 import orbax.checkpoint as ocp
 
 from kestrl.algorithms.base import BaseAlgorithm
-from kestrl.algorithms.losses.sac_losses import (
+from kestrl.algorithms.functions.sac_losses import (
     get_continuous_actor_action,
     get_discrete_actor_action
 )
-from kestrl.algorithms.losses.sac_updates import (
+from kestrl.algorithms.functions.sac_updates import (
     update_continuous_actor_alpha,
     update_continuous_critics,
     update_discrete,
@@ -67,6 +67,9 @@ class SAC(BaseAlgorithm):
         self.train_freq = self.config.get('train_freq', 10)
         self.target_update_interval = self.config.get('target_update_interval', 500)
         self.policy_frequency = self.config.get('policy_frequency', 1)
+
+        self.max_ep_length = 1
+        self.episode_count = 1
 
         # ── Entropy tuning ────────────────────────────────────
         self.autotune_alpha = self.config.get('autotune_alpha', True)
@@ -169,6 +172,7 @@ class SAC(BaseAlgorithm):
             buffer_size=self.buffer_size,
             observation_space=self.env.single_observation_space,
             action_space=self.env.single_action_space,
+            n_envs=self.num_envs,
         )
 
     # ── Action selection ──────────────────────────────────────
@@ -245,11 +249,15 @@ class SAC(BaseAlgorithm):
                             episode_returns.append(float(ep['r'][i]))
                             episode_lengths.append(int(ep['l'][i]))
             
+            # Update max episode length
+            if episode_lengths:
+                self.max_ep_length = max(self.max_ep_length, max(episode_lengths))
+            
             # Final observation handling
             real_next_obs = next_obs.copy()
             if "final_observation" in infos:
-                for idx, trunc in enumerate(truncations):
-                    if trunc and infos["final_observation"][idx] is not None:
+                for idx in range(self.num_envs):
+                    if (terminations[idx] or truncations[idx]) and infos["final_observation"][idx] is not None:
                         real_next_obs[idx] = infos["final_observation"][idx]
 
             # Store transitions in replay buffer

@@ -35,16 +35,16 @@ def test_set_seed_different_seeds():
 
 def test_soft_update_tau_one():
     """tau=1.0 should fully copy online → target."""
-    m1 = MLP(4, (8,), 2, rngs=nnx.Rngs(0))
-    m2 = MLP(4, (8,), 2, rngs=nnx.Rngs(1))
+    m1 = MLP(4, 2, (8,), rngs=nnx.Rngs(0))
+    m2 = MLP(4, 2, (8,), rngs=nnx.Rngs(1))
     x = jnp.ones((1, 4))
     soft_update(m1, m2, tau=1.0)
     assert jnp.allclose(m1(x), m2(x))
 
 def test_soft_update_tau_zero():
     """tau=0.0 should NOT change target."""
-    m1 = MLP(4, (8,), 2, rngs=nnx.Rngs(0))
-    m2 = MLP(4, (8,), 2, rngs=nnx.Rngs(1))
+    m1 = MLP(4, 2, (8,), rngs=nnx.Rngs(0))
+    m2 = MLP(4, 2, (8,), rngs=nnx.Rngs(1))
     x = jnp.ones((1, 4))
     before = m2(x).copy()
     soft_update(m1, m2, tau=0.0)
@@ -52,8 +52,8 @@ def test_soft_update_tau_zero():
 
 def test_soft_update_interpolates():
     """tau=0.5 should give params halfway between online and target."""
-    m1 = MLP(4, (8,), 2, rngs=nnx.Rngs(0))
-    m2 = MLP(4, (8,), 2, rngs=nnx.Rngs(1))
+    m1 = MLP(4, 2, (8,), rngs=nnx.Rngs(0))
+    m2 = MLP(4, 2, (8,), rngs=nnx.Rngs(1))
     # Snapshot values BEFORE update (nnx.state returns a live reference)
     s1_vals = jax.tree.map(lambda x: x.copy(), nnx.state(m1, nnx.Param))
     s2_vals = jax.tree.map(lambda x: x.copy(), nnx.state(m2, nnx.Param))

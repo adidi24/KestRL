@@ -42,6 +42,7 @@ dependencies = [
     "chex",
     "orbax-checkpoint",
     "tf-keras>=2.20.1",
+    "tensorboardx>=2.6.4",
 ]
 
 [build-system]

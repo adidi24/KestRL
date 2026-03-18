@@ -51,7 +51,8 @@ src/kestrl/configs/
 ├── config.yaml                  # root: composes algorithm + environment + experiment
 ├── algorithm/
 │   ├── sac_mujoco.yaml          # SAC for continuous control
-│   └── sac_cartpole.yaml        # SAC for discrete control
+│   ├── sac_cartpole.yaml        # SAC for discrete control
+│   └── pbsac_mujoco.yaml        # PB-SAC for continuous control
 ├── environment/
 │   ├── mujoco.yaml
 │   └── cartpole.yaml
@@ -76,9 +77,9 @@ Switching to a CNN actor later requires only changing `_target_` — no algorith
 | Algorithm | Action space | Status |
 |-----------|-------------|--------|
 | SAC | Discrete + Continuous | Done |
+| PBSAC (PAC-Bayes SAC) | Discrete + Continuous | Done |
 | PPO | Discrete + Continuous | Planned |
 | DQN | Discrete | Planned |
-| PBSAC (PAC-Bayes SAC) | Discrete + Continuous | In progress |
 
 ## Logging
 
