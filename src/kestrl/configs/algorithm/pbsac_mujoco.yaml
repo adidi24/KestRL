@@ -41,7 +41,7 @@ r_max_estimate: 10.0 # Conservative estimate
 mixing_time: 200 # Conservative estimate
 pb_rollout_trajectories: 20
 pb_rollout_steps: 1000
-pb_policy_samples: 8 # Samples for estimation
+pb_policy_samples: 1 # Samples for estimation
 pb_update_epochs: 100 # Optimization epochs
 pb_reset_prior_freq: 10 # EMA-style prior reset frequency
 pb_prior_decay: 0.99 # Decay factor for prior
@@ -54,7 +54,7 @@ actor_freeze_steps: 20 # Steps to freeze actor after PB update
 adaptation_samples: 256 # Samples during critic adaptation
 
 # Posterior-guided exploration
-explore_prob_init: 0.5 # Used for UCB exploration scheduling
-explore_prob_final: 0.1 # Used for UCB exploration scheduling
+explore_prob_init: 0.0 # Used for UCB exploration scheduling
+explore_prob_final: 0.0 # Used for UCB exploration scheduling
 explore_prob_decay_duration: 0.5 # Duration of explore_prob decay
 explore_n_samples: 4 # Policies sampled for UCB check

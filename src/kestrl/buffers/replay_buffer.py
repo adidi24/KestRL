@@ -140,23 +140,19 @@ class ReplayBuffer:
         # Reshape to handle multi-dim and discrete action spaces
         action = action.reshape((self.n_envs, self.action_dim))
 
-        # Copy to avoid modification by reference
-        self.observations[self.pos] = np.array(obs)
-        self.next_observations[self.pos] = np.array(next_obs)
-        self.actions[self.pos] = np.array(action)
-        self.rewards[self.pos] = np.array(reward)
-        self.dones[self.pos] = np.array(done)
+        self.observations[self.pos] = obs
+        self.next_observations[self.pos] = next_obs
+        self.actions[self.pos] = action
+        self.rewards[self.pos] = reward
+        self.dones[self.pos] = done
 
         if self.handle_timeout_termination:
-            self.timeouts[self.pos] = np.array(
-                infos.get("TimeLimit.truncated", np.zeros(self.n_envs, dtype=bool))
-            )
+            self.timeouts[self.pos] = infos.get("TimeLimit.truncated", np.zeros(self.n_envs, dtype=bool))
 
 
-        self.pos += 1
-        if self.pos == self.buffer_size:
+        self.pos = (self.pos + 1) % self.buffer_size
+        if not self.full and self.pos == 0:
             self.full = True
-            self.pos = 0
 
     def extend(self, *args, **kwargs) -> None:
         """

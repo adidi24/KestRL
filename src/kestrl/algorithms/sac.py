@@ -67,6 +67,7 @@ class SAC(BaseAlgorithm):
         self.train_freq = self.config.get('train_freq', 10)
         self.target_update_interval = self.config.get('target_update_interval', 500)
         self.policy_frequency = self.config.get('policy_frequency', 1)
+        self.gradient_steps = self.config.get('gradient_steps', 1)
 
         self.max_ep_length = 1
         self.episode_count = 1
@@ -237,7 +238,7 @@ class SAC(BaseAlgorithm):
             
             # Record episode completions
             rollout_episodes = 0
-            if '_final_info' in infos and any(infos['_final_info']):                                                                                                                 
+            if '_final_info' in infos and any(infos['_final_info']):                                                                                                       
                 final_info = infos['final_info']                                                                                                                                     
                 if '_episode' in final_info:                                                                                                                                         
                     mask = final_info['_episode']                                                                                                                                    
@@ -255,10 +256,10 @@ class SAC(BaseAlgorithm):
             
             # Final observation handling
             real_next_obs = next_obs.copy()
-            if "final_observation" in infos:
+            if "final_obs" in infos:
                 for idx in range(self.num_envs):
-                    if (terminations[idx] or truncations[idx]) and infos["final_observation"][idx] is not None:
-                        real_next_obs[idx] = infos["final_observation"][idx]
+                    if (terminations[idx] or truncations[idx]) and infos["final_obs"][idx] is not None:
+                        real_next_obs[idx] = infos["final_obs"][idx]
 
             # Store transitions in replay buffer
             self.replay_buffer.add(
@@ -292,38 +293,39 @@ class SAC(BaseAlgorithm):
         if self.global_step < self.learning_starts:
             return rollout_metrics
         
-        data = self.replay_buffer.sample(self.batch_size)
-        key = self._next_key()
-        
-        # Always update critics
-        if self.is_discrete:
-            metrics = update_discrete(
-                self.actor, self.critic1, self.critic2,
-                self.target_critic1, self.target_critic2,
-                self.actor_optimizer, self.critic1_optimizer, self.critic2_optimizer,
-                self.log_alpha, self.alpha_optimizer,
-                data.observations, data.actions, data.rewards,
-                data.next_observations, data.dones,
-                self.gamma, self.target_entropy, key)
-        else:
-            metrics = update_continuous_critics(
-                self.actor, self.critic1, self.critic2,
-                self.target_critic1, self.target_critic2,
-                self.critic1_optimizer, self.critic2_optimizer,
-                data.observations, data.actions, data.rewards,
-                data.next_observations, data.dones,
-                self.log_alpha, self.gamma,
-                self.action_scale, self.action_bias, key)
-            # Delayed actor + alpha update (TD3-style)
-            if self.global_step % self.policy_frequency == 0:
-                for _ in range(self.policy_frequency):
-                    key = self._next_key()
-                    actor_alpha_metrics = update_continuous_actor_alpha(
-                            self.actor, self.critic1, self.critic2,
-                            self.actor_optimizer, self.log_alpha, self.alpha_optimizer,
-                            data.observations, self.action_scale, self.action_bias,
-                            self.autotune_alpha, self.target_entropy, key)
-                    metrics.update(actor_alpha_metrics)
+        for _ in range(self.gradient_steps):
+            data = self.replay_buffer.sample(self.batch_size)
+            key = self._next_key()
+            
+            # Always update critics
+            if self.is_discrete:
+                metrics = update_discrete(
+                    self.actor, self.critic1, self.critic2,
+                    self.target_critic1, self.target_critic2,
+                    self.actor_optimizer, self.critic1_optimizer, self.critic2_optimizer,
+                    self.log_alpha, self.alpha_optimizer,
+                    data.observations, data.actions, data.rewards,
+                    data.next_observations, data.dones,
+                    self.gamma, self.target_entropy, key)
+            else:
+                metrics = update_continuous_critics(
+                    self.actor, self.critic1, self.critic2,
+                    self.target_critic1, self.target_critic2,
+                    self.critic1_optimizer, self.critic2_optimizer,
+                    data.observations, data.actions, data.rewards,
+                    data.next_observations, data.dones,
+                    self.log_alpha, self.gamma,
+                    self.action_scale, self.action_bias, key)
+                # Delayed actor + alpha update (TD3-style)
+                if self.global_step % self.policy_frequency == 0:
+                    for _ in range(self.policy_frequency):
+                        key = self._next_key()
+                        actor_alpha_metrics = update_continuous_actor_alpha(
+                                self.actor, self.critic1, self.critic2,
+                                self.actor_optimizer, self.log_alpha, self.alpha_optimizer,
+                                data.observations, self.action_scale, self.action_bias,
+                                self.autotune_alpha, self.target_entropy, key)
+                        metrics.update(actor_alpha_metrics)
         
         # Target network soft update
         if self.global_step % self.target_update_interval == 0:
