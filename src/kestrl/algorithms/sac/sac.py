@@ -14,7 +14,6 @@ Architecture:
 """
 
 import json
-import time
 import copy
 from pathlib import Path
 from typing import Any
@@ -28,24 +27,28 @@ import optax
 import orbax.checkpoint as ocp
 
 from kestrl.algorithms.base import BaseAlgorithm
-from kestrl.algorithms.functions.sac_losses import (
-    get_continuous_actor_action,
-    get_discrete_actor_action
+from kestrl.algorithms.sac.updates import (
+    _make_frozen_continuous_update,
+    _make_frozen_discrete_update,
+    _make_frozen_soft_update,
+    _make_frozen_get_action,
+    _make_frozen_discrete_get_action,
 )
-from kestrl.algorithms.functions.sac_updates import (
-    update_continuous_actor_alpha,
-    update_continuous_critics,
-    update_discrete,
-)
+
 from kestrl.networks import MLP, MultiHeadMLP
 from kestrl.buffers.replay_buffer import ReplayBuffer
-from kestrl.utils import soft_update
 
 
 class LogAlpha(nnx.Module):
     """Tiny wrapper so log_alpha can be used with nnx.Optimizer."""
     def __init__(self, init_value: float = 0.0):
         self.value = nnx.Param(jnp.array(init_value))
+
+
+class _SACBundle(nnx.Module):
+    """Thin container so NNX can split all continuous SAC modules in one call."""
+    pass
+
 
 class SAC(BaseAlgorithm):
     """Soft Actor-Critic with discrete bug fixes."""
@@ -75,8 +78,6 @@ class SAC(BaseAlgorithm):
         # ── Entropy tuning ────────────────────────────────────
         self.autotune_alpha = self.config.get('autotune_alpha', True)
         if self.is_discrete:
-            # Target entropy: ratio * log(1/|A|) — negative, acts as entropy floor
-            # When policy entropy < |target|, alpha increases to encourage exploration
             target_ratio = self.config.get('target_entropy_ratio', 0.25) # 0.98
             self.target_entropy = target_ratio * jnp.log(1.0 / self.action_dim)
         else:
@@ -86,6 +87,10 @@ class SAC(BaseAlgorithm):
         # ── Build everything ──────────────────────────────────
         self._build_networks()
         self._build_buffer()
+        if self.is_discrete:
+            self._freeze_discrete()
+        else:
+            self._freeze_continuous()
 
     def _build_networks(self) -> None:
         """Create actor, critics, target critics, and optimizers."""
@@ -175,67 +180,128 @@ class SAC(BaseAlgorithm):
             action_space=self.env.single_action_space,
             n_envs=self.num_envs,
         )
+        self._device = jax.devices()[0]
+        self._obs_jax_prefetch = None   # populated on first collect_rollouts call
+
+    def _freeze_continuous(self) -> None:
+        bundle = _SACBundle()
+        bundle.actor        = self.actor
+        bundle.actor_opt    = self.actor_optimizer
+        bundle.critic1      = self.critic1
+        bundle.critic1_opt  = self.critic1_optimizer
+        bundle.critic2      = self.critic2
+        bundle.critic2_opt  = self.critic2_optimizer
+        bundle.target_critic1 = self.target_critic1
+        bundle.target_critic2 = self.target_critic2
+        bundle.log_alpha    = self.log_alpha
+        if self.autotune_alpha:
+            bundle.alpha_opt = self.alpha_optimizer
+
+        self._bundle_gd, self._bundle_state = nnx.split(bundle)
+
+        self._jit_update_critics, self._jit_update_actor_alpha = \
+            _make_frozen_continuous_update(self._bundle_gd, self.autotune_alpha)
+        self._jit_soft_update = _make_frozen_soft_update(self._bundle_gd)
+        self._jit_get_action_sample, self._jit_get_action_det = \
+            _make_frozen_get_action(self._bundle_gd)
+
+        del (self.actor, self.actor_optimizer,
+             self.critic1, self.critic1_optimizer,
+             self.critic2, self.critic2_optimizer,
+             self.target_critic1, self.target_critic2,
+             self.log_alpha)
+        if self.autotune_alpha:
+            del self.alpha_optimizer
+
+    def _freeze_discrete(self) -> None:
+        bundle = _SACBundle()
+        bundle.actor        = self.actor
+        bundle.actor_opt    = self.actor_optimizer
+        bundle.critic1      = self.critic1
+        bundle.critic1_opt  = self.critic1_optimizer
+        bundle.critic2      = self.critic2
+        bundle.critic2_opt  = self.critic2_optimizer
+        bundle.target_critic1 = self.target_critic1
+        bundle.target_critic2 = self.target_critic2
+        bundle.log_alpha    = self.log_alpha
+        if self.autotune_alpha:
+            bundle.alpha_opt = self.alpha_optimizer
+
+        self._bundle_gd, self._bundle_state = nnx.split(bundle)
+
+        self._jit_update      = _make_frozen_discrete_update(
+            self._bundle_gd, self.autotune_alpha)
+        self._jit_soft_update = _make_frozen_soft_update(self._bundle_gd)
+        self._jit_get_action_sample, self._jit_get_action_det = \
+            _make_frozen_discrete_get_action(self._bundle_gd)
+
+        del (self.actor, self.actor_optimizer,
+             self.critic1, self.critic1_optimizer,
+             self.critic2, self.critic2_optimizer,
+             self.target_critic1, self.target_critic2,
+             self.log_alpha)
+        if self.autotune_alpha:
+            del self.alpha_optimizer
 
     # ── Action selection ──────────────────────────────────────
 
-    def get_action(self, obs: jax.Array, *, deterministic: bool = False) -> jax.Array:
-        """Select action given observation.
-        
-        Discrete: sample from softmax(logits)  or  argmax(logits)
-        Continuous: sample from tanh(Normal(mean, std))  or  tanh(mean)
-        """
-        log_prob, action_probs = None, None
-        
-        key = self._next_key()
+    def get_action(self, obs: jax.Array, *, deterministic: bool = False, key: jax.Array = None) -> jax.Array:
+        if key is None:
+            key = self._next_key()
         if self.is_discrete:
             if deterministic:
-                logits = self.actor(obs)
-                return jnp.argmax(logits, axis=-1), log_prob, action_probs
-            
-            action, log_prob, action_probs = get_discrete_actor_action(self.actor, obs, key)
+                return self._jit_get_action_det(self._bundle_state, obs), None, None
+            action, log_prob, action_probs = self._jit_get_action_sample(
+                self._bundle_state, obs, key)
             return action, log_prob, action_probs
-        
         else:
             if deterministic:
-                logits = self.actor(obs)
-                mean = jnp.tanh(logits['mean']) * self.action_scale + self.action_bias
-                return mean, None, None
-
-            action, log_prob, mean = get_continuous_actor_action(
-                self.actor, obs, self.action_scale, self.action_bias, key)
+                return self._jit_get_action_det(
+                    self._bundle_state, obs, self.action_scale, self.action_bias), None, None
+            action, log_prob, mean = self._jit_get_action_sample(
+                self._bundle_state, obs, self.action_scale, self.action_bias, key)
             return action, log_prob, mean
 
     # ── Rollout collection ────────────────────────────────────
 
-    def collect_rollouts(self, num_steps: int = 1) -> None:
+    def collect_rollouts(self, num_steps: int = 1, action_keys: tuple = None) -> None:
         """Collect experience for replay buffer."""
         if self.last_obs is None:
             self.last_obs, _ = self.env.reset()
-        
+
+        # Seed prefetch on very first call
+        if self._obs_jax_prefetch is None:
+            self._obs_jax_prefetch = jax.device_put(
+                np.ascontiguousarray(self.last_obs, dtype=np.float32), self._device)
+
         episode_returns = []
         episode_lengths = []
-        
-        for _ in range(num_steps):
+
+        for _i in range(num_steps):
             self.global_step += self.env.num_envs
-            
-            self._obs_array = jnp.array(self.last_obs)
-            
+
             if self.global_step < self.learning_starts:
                 # Vectorized random action sampling
                 if self.is_discrete:
                     actions = np.random.randint(0, self.action_space.n, size=(self.env.num_envs,))
                 else:
                     actions = np.random.uniform(
-                        self.action_space.low, self.action_space.high, 
+                        self.action_space.low, self.action_space.high,
                         size=(self.env.num_envs, self.action_space.shape[0])
                     )
             else:
-                actions, _, _ = self.get_action(self._obs_array, deterministic=False)
+                # Use pre-fetched obs — already on GPU from previous iteration's dispatch
+                _key = action_keys[_i] if action_keys is not None else None
+                actions, _, _ = self.get_action(self._obs_jax_prefetch, deterministic=False, key=_key)
                 actions = np.asarray(actions)
             
             # Take environment step
             next_obs, rewards, terminations, truncations, infos = self.env.step(actions)
-            
+
+            # Dispatch H2D for next iteration immediately
+            self._obs_jax_prefetch = jax.device_put(
+                np.ascontiguousarray(next_obs, dtype=np.float32), self._device)
+
             # Record episode completions
             rollout_episodes = 0
             if '_final_info' in infos and any(infos['_final_info']):                                                                                                       
@@ -289,49 +355,49 @@ class SAC(BaseAlgorithm):
     # ── Training step ─────────────────────────────────────────
 
     def train_step(self):
-        rollout_metrics = self.collect_rollouts(self.train_freq)
+        # Pre-generate all PRNG keys with one split to save per-call dispatch overhead.
+        if self.is_discrete:
+            action_keys = self._next_n_keys(self.train_freq)
+            critic_keys = None
+        else:
+            all_keys    = self._next_n_keys(self.train_freq + self.gradient_steps)
+            action_keys = all_keys[:self.train_freq]
+            critic_keys = all_keys[self.train_freq:]
+
+        rollout_metrics = self.collect_rollouts(self.train_freq, action_keys=action_keys)
         if self.global_step < self.learning_starts:
             return rollout_metrics
-        
-        for _ in range(self.gradient_steps):
+
+        for _gi in range(self.gradient_steps):
             data = self.replay_buffer.sample(self.batch_size)
-            key = self._next_key()
-            
-            # Always update critics
+
             if self.is_discrete:
-                metrics = update_discrete(
-                    self.actor, self.critic1, self.critic2,
-                    self.target_critic1, self.target_critic2,
-                    self.actor_optimizer, self.critic1_optimizer, self.critic2_optimizer,
-                    self.log_alpha, self.alpha_optimizer,
+                self._bundle_state, metrics = self._jit_update(
+                    self._bundle_state,
                     data.observations, data.actions, data.rewards,
                     data.next_observations, data.dones,
-                    self.gamma, self.target_entropy, key)
+                    self.gamma, self.target_entropy,
+                )
             else:
-                metrics = update_continuous_critics(
-                    self.actor, self.critic1, self.critic2,
-                    self.target_critic1, self.target_critic2,
-                    self.critic1_optimizer, self.critic2_optimizer,
+                self._bundle_state, metrics = self._jit_update_critics(
+                    self._bundle_state,
                     data.observations, data.actions, data.rewards,
                     data.next_observations, data.dones,
-                    self.log_alpha, self.gamma,
-                    self.action_scale, self.action_bias, key)
-                # Delayed actor + alpha update (TD3-style)
+                    self.gamma, self.action_scale, self.action_bias, critic_keys[_gi],
+                )
                 if self.global_step % self.policy_frequency == 0:
-                    for _ in range(self.policy_frequency):
-                        key = self._next_key()
-                        actor_alpha_metrics = update_continuous_actor_alpha(
-                                self.actor, self.critic1, self.critic2,
-                                self.actor_optimizer, self.log_alpha, self.alpha_optimizer,
-                                data.observations, self.action_scale, self.action_bias,
-                                self.autotune_alpha, self.target_entropy, key)
-                        metrics.update(actor_alpha_metrics)
-        
-        # Target network soft update
+                    actor_keys = self._next_n_keys(self.policy_frequency)
+                    for actor_key in actor_keys:
+                        self._bundle_state, actor_metrics = self._jit_update_actor_alpha(
+                            self._bundle_state,
+                            data.observations, self.action_scale, self.action_bias,
+                            self.target_entropy, actor_key,
+                        )
+                        metrics.update(actor_metrics)
+
         if self.global_step % self.target_update_interval == 0:
-            soft_update(self.critic1, self.target_critic1, self.tau)
-            soft_update(self.critic2, self.target_critic2, self.tau)
-        
+            self._bundle_state = self._jit_soft_update(self._bundle_state, self.tau)
+
         return {**rollout_metrics, **metrics}
 
     # ── Checkpointing ─────────────────────────────────────────
@@ -340,7 +406,7 @@ class SAC(BaseAlgorithm):
         """Save network params, optimizer states, and training metadata.
 
         Creates a directory at `path` containing:
-          - arrays/        : orbax checkpoint (params + optimizer opt_states)
+          - arrays/        : orbax checkpoint
           - metadata.json  : training scalars (global_step, episode_count)
 
         The caller is responsible for using unique paths (e.g. step-stamped).
@@ -348,19 +414,22 @@ class SAC(BaseAlgorithm):
         ckpt_dir = Path(path).resolve()
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        arrays = {
-            'actor':         nnx.state(self.actor),
-            'critic1':       nnx.state(self.critic1),
-            'critic2':       nnx.state(self.critic2),
-            'target_critic1': nnx.state(self.target_critic1),
-            'target_critic2': nnx.state(self.target_critic2),
-            'log_alpha':     nnx.state(self.log_alpha),
-            'actor_opt':     self.actor_optimizer.opt_state,
-            'critic1_opt':   self.critic1_optimizer.opt_state,
-            'critic2_opt':   self.critic2_optimizer.opt_state,
-        }
-        if self.autotune_alpha:
-            arrays['alpha_opt'] = self.alpha_optimizer.opt_state
+        if self._frozen:
+            arrays = {'bundle': self._bundle_state}
+        else:
+            arrays = {
+                'actor':          nnx.state(self.actor),
+                'critic1':        nnx.state(self.critic1),
+                'critic2':        nnx.state(self.critic2),
+                'target_critic1': nnx.state(self.target_critic1),
+                'target_critic2': nnx.state(self.target_critic2),
+                'log_alpha':      nnx.state(self.log_alpha),
+                'actor_opt':      self.actor_optimizer.opt_state,
+                'critic1_opt':    self.critic1_optimizer.opt_state,
+                'critic2_opt':    self.critic2_optimizer.opt_state,
+            }
+            if self.autotune_alpha:
+                arrays['alpha_opt'] = self.alpha_optimizer.opt_state
 
         checkpointer = ocp.StandardCheckpointer()
         checkpointer.save(ckpt_dir / 'arrays', arrays)
@@ -371,43 +440,44 @@ class SAC(BaseAlgorithm):
                        'episode_count': self.episode_count}, f)
 
     def load(self, path: str) -> None:
-        """Restore from a checkpoint created by save().
-
-        Requires networks to be already built (_build_networks runs in __init__),
-        which provides the abstract structure needed by orbax restore.
-        """
+        """Restore from a checkpoint created by save()."""
         ckpt_dir = Path(path).resolve()
 
-        # Abstract target
-        abstract = {
-            'actor':         nnx.state(self.actor),
-            'critic1':       nnx.state(self.critic1),
-            'critic2':       nnx.state(self.critic2),
-            'target_critic1': nnx.state(self.target_critic1),
-            'target_critic2': nnx.state(self.target_critic2),
-            'log_alpha':     nnx.state(self.log_alpha),
-            'actor_opt':     self.actor_optimizer.opt_state,
-            'critic1_opt':   self.critic1_optimizer.opt_state,
-            'critic2_opt':   self.critic2_optimizer.opt_state,
-        }
-        if self.autotune_alpha:
-            abstract['alpha_opt'] = self.alpha_optimizer.opt_state
+        if self._frozen:
+            abstract = {'bundle': self._bundle_state}
+            restored = ocp.StandardCheckpointer().restore(
+                ckpt_dir / 'arrays', target=abstract)
+            self._bundle_state = restored['bundle']
+        else:
+            abstract = {
+                'actor':          nnx.state(self.actor),
+                'critic1':        nnx.state(self.critic1),
+                'critic2':        nnx.state(self.critic2),
+                'target_critic1': nnx.state(self.target_critic1),
+                'target_critic2': nnx.state(self.target_critic2),
+                'log_alpha':      nnx.state(self.log_alpha),
+                'actor_opt':      self.actor_optimizer.opt_state,
+                'critic1_opt':    self.critic1_optimizer.opt_state,
+                'critic2_opt':    self.critic2_optimizer.opt_state,
+            }
+            if self.autotune_alpha:
+                abstract['alpha_opt'] = self.alpha_optimizer.opt_state
 
-        restored = ocp.StandardCheckpointer().restore(ckpt_dir / 'arrays',
-                                                      target=abstract)
+            restored = ocp.StandardCheckpointer().restore(
+                ckpt_dir / 'arrays', target=abstract)
 
-        nnx.update(self.actor,          restored['actor'])
-        nnx.update(self.critic1,        restored['critic1'])
-        nnx.update(self.critic2,        restored['critic2'])
-        nnx.update(self.target_critic1, restored['target_critic1'])
-        nnx.update(self.target_critic2, restored['target_critic2'])
-        nnx.update(self.log_alpha,      restored['log_alpha'])
+            nnx.update(self.actor,          restored['actor'])
+            nnx.update(self.critic1,        restored['critic1'])
+            nnx.update(self.critic2,        restored['critic2'])
+            nnx.update(self.target_critic1, restored['target_critic1'])
+            nnx.update(self.target_critic2, restored['target_critic2'])
+            nnx.update(self.log_alpha,      restored['log_alpha'])
 
-        self.actor_optimizer.opt_state   = restored['actor_opt']
-        self.critic1_optimizer.opt_state = restored['critic1_opt']
-        self.critic2_optimizer.opt_state = restored['critic2_opt']
-        if self.autotune_alpha and 'alpha_opt' in restored:
-            self.alpha_optimizer.opt_state = restored['alpha_opt']
+            self.actor_optimizer.opt_state   = restored['actor_opt']
+            self.critic1_optimizer.opt_state = restored['critic1_opt']
+            self.critic2_optimizer.opt_state = restored['critic2_opt']
+            if self.autotune_alpha and 'alpha_opt' in restored:
+                self.alpha_optimizer.opt_state = restored['alpha_opt']
 
         with open(ckpt_dir / 'metadata.json') as f:
             meta = json.load(f)

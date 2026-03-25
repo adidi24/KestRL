@@ -174,3 +174,9 @@ class BaseAlgorithm(ABC):
         """Split and advance the PRNG key. Returns a fresh subkey."""
         self.key, subkey = jax.random.split(self.key)
         return subkey
+
+    def _next_n_keys(self, n: int) -> tuple:
+        """Generate n subkeys with a single split. Cheaper than n _next_key() calls."""
+        keys = jax.random.split(self.key, n + 1)
+        self.key = keys[0]
+        return tuple(keys[1:])

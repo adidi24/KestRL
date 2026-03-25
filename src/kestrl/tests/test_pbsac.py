@@ -121,7 +121,7 @@ def test_collect_pb_rollouts_and_evaluate_policy_is(monkeypatch, env_id, is_disc
             assert np.isclose(traj.G, expected_G)
             
     # Test Evaluate
-    from kestrl.algorithms.functions.pbsac_losses import compute_policy_is_return
+    from kestrl.algorithms.pbsac.losses import compute_policy_is_return
     import jax.numpy as jnp
     batch_data = {
         'states': jnp.stack([t.states for t in all_trajs]),
@@ -414,7 +414,7 @@ def test_posterior_actor_synchronization():
 
 # ── Tests for compute_posterior_guided_targets (Task 5.6) ─────────────────────
 
-from kestrl.algorithms.functions.pbsac_losses import compute_posterior_guided_targets
+from kestrl.algorithms.pbsac.losses import compute_posterior_guided_targets
 
 def test_posterior_guided_targets_shape_and_validity():
     """Output is (B,), finite, no nan/inf."""
@@ -438,7 +438,7 @@ def test_posterior_guided_targets_uses_mean_at_i0():
     i=0 skips the else-branch split, so act_key = split(original_key)[1]).
     If i=0 called block_sample instead of the mean, the targets would diverge.
     """
-    from kestrl.algorithms.functions.sac_losses import get_continuous_actor_action
+    from kestrl.algorithms.sac.losses import get_continuous_actor_action
     s = make_continuous_setup()
     key = jax.random.PRNGKey(7)
 
@@ -524,7 +524,7 @@ def test_posterior_guided_targets_bellman_structure():
 
 # ── Tests for adaptive_update_*_critics (Task 5.6) ────────────────────────────
 
-from kestrl.algorithms.functions.pbsac_updates import (
+from kestrl.algorithms.pbsac.updates import (
     adaptive_update_continuous_critics,
     adaptive_update_discrete_critics,
 )
@@ -608,11 +608,11 @@ def test_adaptive_discrete_critic_update_modifies_params():
 
 # ── Tests for UCB action selection (Task 5.8) ─────────────────────────────────
 
-from kestrl.algorithms.functions.pbsac_losses import (
+from kestrl.algorithms.pbsac.losses import (
     get_continuous_actor_action_from_posterior,
     get_discrete_actor_action_from_posterior,
 )
-from kestrl.algorithms.functions.sac_losses import get_continuous_actor_action
+from kestrl.algorithms.sac.losses import get_continuous_actor_action
 
 def test_ucb_explore_prob_zero_returns_standard_action():
     """explore_prob=0.0 always takes the standard SAC path (no posterior sampling)."""

@@ -2,7 +2,6 @@ from typing import Any, NamedTuple
 import warnings
 
 import numpy as np
-import jax.numpy as jnp
 import jax
 
 from gymnasium import spaces
@@ -50,60 +49,59 @@ class ReplayBuffer:
     ):
         super().__init__()
         self.buffer_size = max(buffer_size // n_envs, 1)
-        
+
         self.observation_space = observation_space
         self.action_space = action_space
-        
+
         self.obs_shape = observation_space.shape
         if hasattr(self.action_space, 'n'):
             # For discrete spaces
             self.action_dim = 1
         else:
             self.action_dim = int(np.prod(self.action_space.shape))
-            
-        
+
         self.pos = 0
         self.full = False
         self.n_envs = n_envs
 
-        self.observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=self.observation_space.dtype)
-        self.next_observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=self.observation_space.dtype)
+        # Store as float32 — halves data size vs float64 (MuJoCo default), reducing cache pressure
+        self.observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=np.float32)
+        self.next_observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=np.float32)
         self.actions = np.zeros((self.buffer_size, self.n_envs, self.action_dim), dtype=self._maybe_cast_dtype(action_space.dtype))
         self.rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.dones = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
-        # Handle timeouts termination properly if needed
         self.handle_timeout_termination = handle_timeout_termination
         self.timeouts = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
 
         if psutil is not None:
             mem_available = psutil.virtual_memory().available
-            
+
             total_memory_usage: float = (
                 self.observations.nbytes + self.actions.nbytes + self.rewards.nbytes + self.dones.nbytes
             )
-
             total_memory_usage += self.next_observations.nbytes
 
             if total_memory_usage > mem_available:
-                # Convert to GB
                 total_memory_usage /= 1e9
                 mem_available /= 1e9
                 warnings.warn(
                     "This system does not have apparently enough memory to store the complete "
                     f"replay buffer {total_memory_usage:.2f}GB > {mem_available:.2f}GB"
                 )
-        
-        
+
+        self._staging: np.ndarray | None = None   # allocated lazily on first sample call
+        self._device = jax.devices()[0]
+
     @staticmethod
     def swap_and_flatten(arr: np.ndarray) -> np.ndarray:
         """
         Swap and then flatten axes 0 (buffer_size) and 1 (n_envs)
         to convert shape from [n_steps, n_envs, ...] (when ... is the shape of the features)
         to [n_steps * n_envs, ...] (which maintain the order)
-        
+
         Args:
             arr: (np.ndarray)
-        
+
         Returns:
             np.ndarray
         """
@@ -131,13 +129,10 @@ class ReplayBuffer:
         """
         Add elements to the buffer.
         """
-        # Reshape needed when using multiple envs with discrete observations
-        # as numpy cannot broadcast (n_discrete,) to (n_discrete, 1)
         if isinstance(self.observation_space, spaces.Discrete):
             obs = obs.reshape((self.n_envs, *self.obs_shape))
             next_obs = next_obs.reshape((self.n_envs, *self.obs_shape))
 
-        # Reshape to handle multi-dim and discrete action spaces
         action = action.reshape((self.n_envs, self.action_dim))
 
         self.observations[self.pos] = obs
@@ -149,7 +144,6 @@ class ReplayBuffer:
         if self.handle_timeout_termination:
             self.timeouts[self.pos] = infos.get("TimeLimit.truncated", np.zeros(self.n_envs, dtype=bool))
 
-
         self.pos = (self.pos + 1) % self.buffer_size
         if not self.full and self.pos == 0:
             self.full = True
@@ -158,7 +152,6 @@ class ReplayBuffer:
         """
         Add a new batch of transitions to the buffer
         """
-        # Do a for loop along the batch axis
         for data in zip(*args):
             self.add(*data)
 
@@ -169,48 +162,40 @@ class ReplayBuffer:
         self.pos = 0
         self.full = False
 
-    def sample(self, batch_size: int):
-        """
-        Args:
-            batch_size (int) : Number of element to sample
-            env : associated gym VecEnv
-                to normalize the observations/rewards when sampling
-        
-        Returns:
-        """
+    def sample(self, batch_size: int) -> ReplayBufferSamples:
         upper_bound = self.buffer_size if self.full else self.pos
         batch_inds = np.random.randint(0, upper_bound, size=batch_size)
         return self._get_samples(batch_inds)
-    
-    def _get_samples(self, batch_inds: np.ndarray) -> tuple:
-        # Sample randomly the env idx
+
+    def _get_samples(self, batch_inds: np.ndarray) -> ReplayBufferSamples:
         env_indices = np.random.randint(0, high=self.n_envs, size=(len(batch_inds),))
+        B = len(batch_inds)
 
-        next_obs = self.next_observations[batch_inds, env_indices, :]
+        obs_dim = int(np.prod(self.obs_shape))
+        act_dim = self.action_dim
+        width = obs_dim * 2 + act_dim + 2          # obs | next_obs | acts | done | reward
+        if self._staging is None or self._staging.shape[0] < B:
+            self._staging = np.empty((B, width), dtype=np.float32)
 
-        data = (
-            self.observations[batch_inds, env_indices, :],
-            self.actions[batch_inds, env_indices, :],
-            next_obs,
-            # Only use dones that are not due to timeouts
-            # deactivated by default (timeouts is initialized as an array of False)
-            (self.dones[batch_inds, env_indices] * (1 - self.timeouts[batch_inds, env_indices])).reshape(-1, 1),
-            self.rewards[batch_inds, env_indices].reshape(-1, 1),
+        s = self._staging[:B]
+        s[:, :obs_dim] = self.observations[batch_inds, env_indices].reshape(B, obs_dim)
+        s[:, obs_dim:2*obs_dim] = self.next_observations[batch_inds, env_indices].reshape(B, obs_dim)
+        s[:, 2*obs_dim:2*obs_dim+act_dim]    = self.actions[batch_inds, env_indices]
+        s[:, 2*obs_dim+act_dim]              = (
+            self.dones[batch_inds, env_indices]
+            * (1 - self.timeouts[batch_inds, env_indices])
         )
-        return ReplayBufferSamples(*tuple(map(self.to_jnp, data)))
+        s[:, 2*obs_dim+act_dim+1]            = self.rewards[batch_inds, env_indices]
 
-    def to_jnp(self, array: np.ndarray, dtype: jnp.dtype = jnp.float32) -> jnp.array:
-        """
-        Convert a numpy array to a jax numpy array.
+        gpu = jax.device_put(s, self._device)
+        return ReplayBufferSamples(
+            observations      = gpu[:, :obs_dim].reshape(B, *self.obs_shape),
+            next_observations = gpu[:, obs_dim:2*obs_dim].reshape(B, *self.obs_shape),
+            actions           = gpu[:, 2*obs_dim:2*obs_dim+act_dim],
+            dones             = gpu[:, 2*obs_dim+act_dim:2*obs_dim+act_dim+1],
+            rewards           = gpu[:, 2*obs_dim+act_dim+1:],
+        )
 
-        Args:
-            array (np.ndarray): Array to convert
-        
-        Returns:
-            jnp.array
-        """
-        return jnp.array(array, dtype=dtype)
-    
     @staticmethod
     def _maybe_cast_dtype(dtype: np.typing.DTypeLike) -> np.typing.DTypeLike:
         """

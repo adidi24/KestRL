@@ -10,8 +10,8 @@ be an nnx.Module itself.
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from kestrl.algorithms.functions.pbsac_losses import compute_pac_bayes_loss
-from kestrl.algorithms.functions.sac_losses import (
+from kestrl.algorithms.pbsac.losses import compute_pac_bayes_loss
+from kestrl.algorithms.sac.losses import (
     compute_discrete_critic_loss,
     compute_continuous_critic_loss,
 )

@@ -29,7 +29,7 @@ Requires Python 3.10–3.12. JAX CPU backend is installed by default.
 ## Quick Start
 
 ```bash
-# SAC on Pendulum-v1 (continuous)
+# SAC on HalfCheetah-v5 (continuous)
 python -m kestrl.experiments.run
 
 # SAC on CartPole-v1 (discrete)

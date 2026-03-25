@@ -196,6 +196,58 @@ def test_multi_env_buffer():
     assert buf.actions.shape == (50, 2, 1)
 
 
+# ── Staging Buffer Tests ──────────────────────────────────────
+
+def test_staging_buffer_resizes():
+    """Staging buffer should grow when sampled with a larger batch than before."""
+    buf = make_continuous_buffer(100)
+    add_transitions(buf, 50)
+    inds = np.arange(8)
+    buf._get_samples(inds)
+    assert buf._staging is not None
+    assert buf._staging.shape[0] >= 8
+    inds32 = np.arange(32)
+    buf._get_samples(inds32)
+    assert buf._staging.shape[0] >= 32
+
+
+def test_staging_buffer_values():
+    """Sampled values must match what was stored (single known transition)."""
+    buf = make_continuous_buffer(10)
+    obs      = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    next_obs = np.array([5.0, 6.0, 7.0, 8.0], dtype=np.float32)
+    action   = np.array([0.5], dtype=np.float32)
+    reward   = np.array([1.0], dtype=np.float32)
+    done     = np.array([0.0], dtype=np.float32)
+    buf.add(obs, next_obs, action, reward, done, {})
+
+    # Sample index 0 directly to get the known transition back
+    batch = buf._get_samples(np.array([0]))
+    np.testing.assert_allclose(np.asarray(batch.observations[0]), obs, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(batch.next_observations[0]), next_obs, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(batch.actions[0]), action, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(batch.rewards[0, 0]), reward[0], rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(batch.dones[0, 0]), done[0], rtol=1e-6)
+
+
+def test_staging_buffer_multidim_obs():
+    """Staging buffer must correctly flatten and restore multi-dim observations."""
+    obs_space = spaces.Box(-np.inf, np.inf, shape=(4, 3), dtype=np.float32)
+    act_space = spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+    buf = ReplayBuffer(20, obs_space, act_space)
+
+    obs = np.random.randn(4, 3).astype(np.float32)
+    buf.add(obs, obs * 2, np.zeros(2, dtype=np.float32),
+            np.array([1.0]), np.array([0.0]), {})
+
+    batch = buf._get_samples(np.array([0]))
+    assert batch.observations.shape == (1, 4, 3)
+    assert batch.next_observations.shape == (1, 4, 3)
+    np.testing.assert_allclose(np.asarray(batch.observations[0]), obs, rtol=1e-6)
+
+
+
+
 if __name__ == '__main__':
     import pytest
-    pytest.main([__file__, '-v'])
+    pytest.main([__file__, '-v', '-s'])

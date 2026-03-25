@@ -8,7 +8,7 @@ They take network state + data → return (loss, metrics).
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from kestrl.algorithms.functions.sac_losses import (
+from kestrl.algorithms.sac.losses import (
     get_discrete_action_log_prob,
     get_continuous_action_log_prob,
     get_discrete_actor_action,

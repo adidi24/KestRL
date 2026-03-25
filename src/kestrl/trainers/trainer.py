@@ -60,16 +60,25 @@ class Trainer:
         print(f"Algorithm: {self.algorithm.__class__.__name__}")
         print(f"Backend: JAX")
         print("-" * 50)
+        
+        # Keep track of the previous step's metrics
+        # This is done to avoid the GPU to wait for the CPU to log the metrics
+        pending_metrics = None
+        display_critic_loss = 0.0
 
         with tqdm.tqdm(total=self.total_timesteps, desc="Training") as pbar:
             while self.algorithm.global_step < self.total_timesteps:
                 # One training step (collect + update)
                 metrics = self.algorithm.train_step()
 
-                # Log metrics
-                self._log_metrics(metrics)
+                if pending_metrics is not None:
+                    display_critic_loss = float(pending_metrics.get('critic/loss', 0))
+                    
+                    self._log_metrics(pending_metrics)
 
-                # Update progress bar
+                pending_metrics = metrics
+
+                # Update progress bar position every step, but refresh display every 50
                 pbar.update(self.algorithm.global_step - pbar.n)
 
                 if metrics.get('rollout/episodes', 0) != 0:
@@ -77,11 +86,12 @@ class Trainer:
                     if ep_returns:
                         self._last_return = float(np.mean(ep_returns))
 
-                pbar.set_postfix({
-                    'SPS': f"{self.algorithm.get_sps():.0f}",
-                    'Return': f"{self._last_return:.2f}",
-                    'critic_loss': f"{metrics.get('critic/loss', 0):.4f}",
-                })
+                if self.algorithm.global_step % 50 == 0:
+                    pbar.set_postfix({
+                        'SPS': f"{self.algorithm.get_sps():.0f}",
+                        'Return': f"{self._last_return:.2f}",
+                        'critic_loss': f"{display_critic_loss:.4f}",
+                    })
 
                 # Periodic evaluation
                 if (self.eval_interval is not None
@@ -96,6 +106,10 @@ class Trainer:
                         and self.algorithm.global_step - self._last_checkpoint_step
                             >= self.checkpoint_interval):
                     self._save_checkpoint()
+            
+            # Log the last metrics
+            if pending_metrics is not None:
+                self._log_metrics(pending_metrics)
 
         # Final evaluation
         if self.eval_env is not None:

@@ -6,7 +6,6 @@ optimised via a PAC-Bayes bound on policy generalisation.
 
 Algorithm (Algorithm 1 of the paper):
 Paper: https://arxiv.org/abs/2510.10544
-Reference implementation: src/benchrl/algorithms/pbsac.py
 """
 
 from __future__ import annotations
@@ -23,19 +22,13 @@ import jax.numpy as jnp
 from flax import nnx
 import optax
 
-from kestrl.algorithms.sac import (
-    SAC,
-    soft_update,
-    update_discrete,
-    update_continuous_critics,
-    update_continuous_actor_alpha
-)
-from kestrl.algorithms.functions.pbsac_updates import (
+from kestrl.algorithms.sac import SAC
+from kestrl.algorithms.pbsac.updates import (
     update_pb_posterior,
     adaptive_update_discrete_critics,
     adaptive_update_continuous_critics
 )
-from kestrl.algorithms.functions.pbsac_losses import (
+from kestrl.algorithms.pbsac.losses import (
     compute_pac_bayes_bound,
     compute_posterior_guided_targets_vmap,
     get_actor_action_from_posterior_vmap,
