@@ -24,20 +24,23 @@ import optax
 
 from kestrl.algorithms.sac import SAC
 from kestrl.algorithms.pbsac.updates import (
-    update_pb_posterior,
-    adaptive_update_discrete_critics,
-    adaptive_update_continuous_critics
+    _make_frozen_update_pb_posterior,
+    _make_frozen_adaptive_discrete_update,
+    _make_frozen_adaptive_continuous_update,
+    _make_frozen_discrete_get_action_pb,
+    _make_frozen_continuous_get_action_pb,
+    _make_frozen_sync_posterior,
+    _make_frozen_inject_posterior,
+    _make_frozen_prior_ema_update,
 )
-from kestrl.algorithms.pbsac.losses import (
-    compute_pac_bayes_bound,
-    compute_posterior_guided_targets_vmap,
-    get_actor_action_from_posterior_vmap,
+from kestrl.algorithms.sac.updates import (
+    _make_frozen_continuous_update,
+    _make_frozen_discrete_update,
+    _make_frozen_soft_update,
 )
 from kestrl.distributions import (
     BlockPosterior,
     BlockPrior,
-    kl_block,
-    _construct_state_from_flat_state
 )
 
 
@@ -52,49 +55,45 @@ class PBTrajectory:
     G:           float        # discounted return Σ γ^t r_t
 
 
+class _PBSACBundle(nnx.Module):
+    """Thin container so NNX can split all PB-SAC modules in one call."""
+    pass
+
 class PBSAC(SAC):
     """PAC-Bayes Soft Actor-Critic."""
 
     def __init__(self, env, algo_cfg: dict[str, Any], *, seed: int = 0):
+
+        self.num_pb_envs             = algo_cfg.get('pb_num_envs', 2)
+        self.pb_rank                 = algo_cfg.get('pb_rank', 10)
+        self.pb_init_std             = algo_cfg.get('pb_init_std', 0.01)
+        self.delta                   = algo_cfg.get('delta', 0.1)
+        self.pb_update_freq          = algo_cfg.get('pb_update_freq', 20_000)
+        self.pb_update_epochs        = algo_cfg.get('pb_update_epochs', 100)
+        self.pb_rollout_trajectories = algo_cfg.get('pb_rollout_trajectories', 100)
+        self.pb_rollout_steps        = algo_cfg.get('pb_rollout_steps', 500)
+        self.pb_policy_samples       = int(algo_cfg.get('pb_policy_samples', 16))
+        self.pb_posterior_lr         = algo_cfg.get('pb_posterior_lr', 3e-4)
+        self.pb_reset_prior_freq     = algo_cfg.get('pb_reset_prior_freq', 20_000)
+        self.pb_prior_decay          = algo_cfg.get('pb_prior_decay', 0.99)
+        self.pac_bayes_active        = algo_cfg.get('pac_bayes_active', True)
+        self.adaptation_samples      = algo_cfg.get('adaptation_samples', 256)
+        self.actor_freeze_steps      = algo_cfg.get('actor_freeze_steps', 20)
+        self.explore_prob_init       = algo_cfg.get('explore_prob_init', 0.5)
+        self.explore_prob            = self.explore_prob_init
+        self.explore_prob_final      = algo_cfg.get('explore_prob_final', 0.1)
+        self.explore_prob_decay_duration = algo_cfg.get('explore_prob_decay_duration', 0.5)
+        self.explore_n_samples       = algo_cfg.get('explore_n_samples', 8)
+        self.r_max       = algo_cfg.get('r_max_estimate', 1.0)
+        self.mixing_time = algo_cfg.get('mixing_time', 1)
+
         super().__init__(env, algo_cfg, seed=seed)
 
-        self.num_pb_envs             = self.config.get('pb_num_envs', 2)
-        self.pb_rank                 = self.config.get('pb_rank', 10)
-        self.pb_init_std             = self.config.get('pb_init_std', 0.01)
-        self.delta                   = self.config.get('delta', 0.1)
-        self.pb_update_freq          = self.config.get('pb_update_freq', 20_000)
-        self.pb_update_epochs        = self.config.get('pb_update_epochs', 100)
-        self.pb_rollout_trajectories = self.config.get('pb_rollout_trajectories', 100)
-        self.pb_rollout_steps        = self.config.get('pb_rollout_steps', 500)
-        self.pb_policy_samples       = int(self.config.get('pb_policy_samples', 16))
-        self.pb_posterior_lr         = self.config.get('pb_posterior_lr', 3e-4)
-        self.pb_reset_prior_freq     = self.config.get('pb_reset_prior_freq', 20_000)
-        self.pb_prior_decay          = self.config.get('pb_prior_decay', 0.99)
-        self.pac_bayes_active        = self.config.get('pac_bayes_active', True)
-        self.adaptation_samples      = self.config.get('adaptation_samples', 256)
-        self.actor_freeze_steps      = self.config.get('actor_freeze_steps', 20)
-        self.explore_prob_init       = self.config.get('explore_prob_init', 0.5)
-        self.explore_prob            = self.explore_prob_init
-        self.explore_prob_final      = self.config.get('explore_prob_final', 0.1)
-        self.explore_prob_decay_duration = self.config.get('explore_prob_decay_duration', 0.5)
-        self.explore_n_samples       = self.config.get('explore_n_samples', 8)
-
-        self.posterior = BlockPosterior.from_actor(
-            self.actor, rank=self.pb_rank, init_std=self.pb_init_std
-        )
-        self.prior = BlockPrior.from_posterior(self.posterior)
-
         self.pb_lambda   = 1.0
-        self.r_max       = self.config.get('r_max_estimate', 1.0)
-        self.mixing_time = self.config.get('mixing_time', 1)
+        self.last_pb_metrics = {}
 
         self.actor_frozen       = False
         self.actor_freeze_until = 0
-
-        self.pb_optimizer = nnx.Optimizer(
-            self.posterior, optax.adam(self.pb_posterior_lr), wrt=nnx.Param
-        )
-        self.last_pb_metrics = {}
 
         from kestrl.environments.registry import get_env_builder
         env_builder = get_env_builder()
@@ -119,23 +118,107 @@ class PBSAC(SAC):
         except Exception as e:
             print(f"Warning: Could not create separate PB environment: {e}")
             self.pb_env = self.env
+    
+    def _freeze_continuous(self) -> None:
+        bundle = _PBSACBundle()
+        bundle.actor        = self.actor
+        bundle.actor_opt    = self.actor_optimizer
+        bundle.critic1      = self.critic1
+        bundle.critic1_opt  = self.critic1_optimizer
+        bundle.critic2      = self.critic2
+        bundle.critic2_opt  = self.critic2_optimizer
+        bundle.target_critic1 = self.target_critic1
+        bundle.target_critic2 = self.target_critic2
+        bundle.log_alpha    = self.log_alpha
+        if self.autotune_alpha:
+            bundle.alpha_opt = self.alpha_optimizer
+        
+        bundle.posterior = BlockPosterior.from_actor(
+            self.actor, rank=self.pb_rank, init_std=self.pb_init_std
+        )
+        bundle.prior = BlockPrior.from_posterior(bundle.posterior)
+        bundle.pb_optimizer = nnx.Optimizer(
+            bundle.posterior, optax.adam(self.pb_posterior_lr), wrt=nnx.Param
+        )
+            
+
+        self._bundle_gd, self._bundle_state = nnx.split(bundle)
+
+        self._jit_update_critics, self._jit_update_actor_alpha = \
+            _make_frozen_continuous_update(self._bundle_gd, self.autotune_alpha)
+        self._jit_soft_update = _make_frozen_soft_update(self._bundle_gd)
+        
+        # PB specific
+        self._jit_update_pb_posterior, self._jit_compute_bound = \
+            _make_frozen_update_pb_posterior(self._bundle_gd, self.is_discrete, self.pb_policy_samples)
+        
+        self._jit_adaptive_update_critics = _make_frozen_adaptive_continuous_update(self._bundle_gd, self.action_scale, self.action_bias, self.adaptation_samples)
+        self._jit_get_action_sample, self._jit_get_action_det = \
+            _make_frozen_continuous_get_action_pb(self._bundle_gd, self.action_scale, self.action_bias, self.explore_n_samples)
+        self._jit_sync_posterior    = _make_frozen_sync_posterior(self._bundle_gd)
+        self._jit_inject_posterior  = _make_frozen_inject_posterior(self._bundle_gd)
+        self._jit_prior_ema_update  = _make_frozen_prior_ema_update(self._bundle_gd, self.pb_prior_decay)
+
+        del (self.actor, self.actor_optimizer,
+             self.critic1, self.critic1_optimizer,
+             self.critic2, self.critic2_optimizer,
+             self.target_critic1, self.target_critic2,
+             self.log_alpha)
+        if self.autotune_alpha:
+            del self.alpha_optimizer
+
+    def _freeze_discrete(self) -> None:
+        bundle = _PBSACBundle()
+        bundle.actor        = self.actor
+        bundle.actor_opt    = self.actor_optimizer
+        bundle.critic1      = self.critic1
+        bundle.critic1_opt  = self.critic1_optimizer
+        bundle.critic2      = self.critic2
+        bundle.critic2_opt  = self.critic2_optimizer
+        bundle.target_critic1 = self.target_critic1
+        bundle.target_critic2 = self.target_critic2
+        bundle.log_alpha    = self.log_alpha
+        if self.autotune_alpha:
+            bundle.alpha_opt = self.alpha_optimizer
+
+        bundle.posterior = BlockPosterior.from_actor(
+            self.actor, rank=self.pb_rank, init_std=self.pb_init_std
+        )
+        bundle.prior = BlockPrior.from_posterior(bundle.posterior)
+        bundle.pb_optimizer = nnx.Optimizer(
+            bundle.posterior, optax.adam(self.pb_posterior_lr), wrt=nnx.Param
+        )
+        
+        self._bundle_gd, self._bundle_state = nnx.split(bundle)
+
+        self._jit_update      = _make_frozen_discrete_update(
+            self._bundle_gd, self.autotune_alpha)
+        self._jit_soft_update = _make_frozen_soft_update(self._bundle_gd)
+        
+        # PB specific
+        self._jit_update_pb_posterior, self._jit_compute_bound = \
+            _make_frozen_update_pb_posterior(self._bundle_gd, self.is_discrete, self.pb_policy_samples)
+        
+        self._jit_adaptive_update_critics = _make_frozen_adaptive_discrete_update(self._bundle_gd, self.adaptation_samples)
+        self._jit_get_action_sample, self._jit_get_action_det = \
+            _make_frozen_discrete_get_action_pb(self._bundle_gd, self.explore_n_samples)
+        self._jit_sync_posterior    = _make_frozen_sync_posterior(self._bundle_gd)
+        self._jit_inject_posterior  = _make_frozen_inject_posterior(self._bundle_gd)
+        self._jit_prior_ema_update  = _make_frozen_prior_ema_update(self._bundle_gd, self.pb_prior_decay)
+
+        del (self.actor, self.actor_optimizer,
+             self.critic1, self.critic1_optimizer,
+             self.critic2, self.critic2_optimizer,
+             self.target_critic1, self.target_critic2,
+             self.log_alpha)
+        if self.autotune_alpha:
+            del self.alpha_optimizer
 
     def _sync_posterior_mean_from_actor(self) -> None:
-        """Copy current actor weights into posterior.mean.
-
-        Uses set_value rather than replacing the posterior object to preserve
-        the optimizer's reference to the posterior's internal Variables.
-        """
-        params_tree = nnx.state(self.actor, nnx.Param)
-        for path, param in nnx.to_flat_state(params_tree):
-            self.posterior.layers[path].mean.set_value(param.get_value().flatten())
+        self._bundle_state = self._jit_sync_posterior(self._bundle_state)
 
     def _inject_posterior_into_actor(self) -> None:
-        """Set actor weights to the posterior mean (no noise added)."""
-        flat_state = {name: lp.mean.get_value() for name, lp in self.posterior.layers.items()}
-        actor_state = _construct_state_from_flat_state(self.actor, flat_state, self.posterior.shapes)
-        graphdef, _ = nnx.split(self.actor)
-        self.actor = nnx.merge(graphdef, actor_state)
+        self._bundle_state = self._jit_inject_posterior(self._bundle_state)
 
     def _collect_pb_rollouts(self) -> tuple[list[PBTrajectory], list[PBTrajectory]]:
         """Collect trajectories with the current policy for PAC-Bayes evaluation.
@@ -161,6 +244,12 @@ class PBSAC(SAC):
                 actions, log_probs_b, _ = self.get_action(obs_array, deterministic=False)
                 actions     = np.asarray(actions)
                 log_probs_b = np.asarray(log_probs_b)
+                if self.is_discrete:
+                    # get_discrete_actor_action returns log_softmax over all actions;
+                    # IS ratio needs only the log prob of the action taken
+                    log_probs_b = log_probs_b[np.arange(num_envs), actions.astype(int)]
+                else:
+                    log_probs_b = log_probs_b.reshape(num_envs)
 
                 next_obs, rewards, terminations, truncations, _ = self.pb_env.step(actions)
                 self.r_max = max(self.r_max, float(np.max(np.abs(rewards))))
@@ -187,19 +276,34 @@ class PBSAC(SAC):
             all_rewards   = np.array(rewards_list)
             all_log_probs = np.array(log_probs_list)
 
+            actual_steps = all_states.shape[0]
+            obs_dim      = all_states.shape[2]
+            act_shape    = all_actions.shape[2:]  # () for discrete, (act_dim,) for continuous
+
             for i in range(num_envs):
                 H = env_lengths[i]
                 if H == 0:
                     continue
                 mask = np.zeros(self.pb_rollout_steps, dtype=bool)
                 mask[:H] = True
-                r = all_rewards[:, i][mask]
+
+                states_pad    = np.zeros((self.pb_rollout_steps, obs_dim))
+                actions_pad   = np.zeros((self.pb_rollout_steps,) + act_shape)
+                rewards_pad   = np.zeros(self.pb_rollout_steps)
+                log_probs_pad = np.zeros(self.pb_rollout_steps)
+
+                states_pad[:actual_steps]    = all_states[:, i]
+                actions_pad[:actual_steps]   = all_actions[:, i]
+                rewards_pad[:actual_steps]   = all_rewards[:, i]
+                log_probs_pad[:actual_steps] = all_log_probs[:, i]
+
+                r = rewards_pad[:H]
                 G = float(sum(r[t] * (self.gamma ** t) for t in range(H)))
                 all_trajectories.append(PBTrajectory(
-                    states=all_states[:, i],
-                    actions=all_actions[:, i],
-                    rewards=all_rewards[:, i],
-                    log_probs_b=all_log_probs[:, i],
+                    states=states_pad,
+                    actions=actions_pad,
+                    rewards=rewards_pad,
+                    log_probs_b=log_probs_pad,
                     mask=mask,
                     G=G,
                 ))
@@ -222,7 +326,6 @@ class PBSAC(SAC):
             return {}
 
         key = self._next_key()
-        original_params = nnx.state(self.actor, nnx.Param)
 
         H = self.max_ep_length
         self.episode_count += len(train_trajs)
@@ -254,14 +357,13 @@ class PBSAC(SAC):
                 batch_data['action_scale'] = self.action_scale
                 batch_data['action_bias']  = self.action_bias
 
-            kl = kl_block(self.posterior, self.prior)
-            self.pb_lambda = math.sqrt(C_const * kl + C_prime_const)
-
-            pb_metrics = update_pb_posterior(
-                self.posterior, self.prior, self.actor, self.pb_optimizer,
-                self.is_discrete, key, self.pb_policy_samples,
-                self.pb_lambda, C_const, C_prime_const, batch_data,
+            self._bundle_state, pb_metrics = self._jit_update_pb_posterior(
+                self._bundle_state,
+                C_const, C_prime_const,
+                batch_data,
+                key,
             )
+            
             if epoch % max(self.pb_update_epochs // 5, 1) == 0:
                 print(
                     f"  Epoch {epoch}/{self.pb_update_epochs}: "
@@ -271,7 +373,6 @@ class PBSAC(SAC):
                     f"return={pb_metrics['mean_empirical_return']:.4f}"
                 )
 
-        nnx.update(self.actor, original_params)
         return pb_metrics
 
     def _compute_pac_bayes_bound(
@@ -296,12 +397,12 @@ class PBSAC(SAC):
             batch_data['action_scale'] = self.action_scale
             batch_data['action_bias']  = self.action_bias
 
-        pb_metrics = compute_pac_bayes_bound(
-            self.posterior, self.prior, self.actor, self.is_discrete,
-            self._next_key(), self.pb_policy_samples,
+        pb_metrics = self._jit_compute_bound(
+            self._bundle_state,
             max(1, self.episode_count), self.max_ep_length,
             self.r_max, self.mixing_time, self.gamma, self.delta,
             batch_data,
+            self._next_key(),
         )
         result = {k: float(v) for k, v in pb_metrics.items()}
         print(
@@ -353,28 +454,40 @@ class PBSAC(SAC):
         self.mixing_time = max(getattr(self, 'mixing_time', 1), mt)
         return self.mixing_time
 
-    def get_action(self, obs: jax.Array, *, deterministic: bool = False) -> jax.Array:
+    def get_action(self, obs: jax.Array, *, deterministic: bool = False, key: jax.Array = None) -> jax.Array:
         """Select an action, optionally using posterior-guided UCB exploration."""
-        key, decision_key = jax.random.split(self._next_key())
-        should_explore = bool(jax.random.uniform(decision_key) < self.explore_prob) and not deterministic
+        if key is None:
+            key, decision_key = jax.random.split(self._next_key())
+        else:
+            key, decision_key = jax.random.split(key)
         
-        return get_actor_action_from_posterior_vmap(
-            self.posterior, self.actor, self.critic1, self.critic2,
-            obs, self.action_scale, self.action_bias,
-            should_explore, self.explore_n_samples, self.is_discrete, deterministic, key
+        if deterministic:                                                                                                                                                
+          if self.is_discrete:
+              return self._jit_get_action_det(self._bundle_state, obs)                                                                                                 
+          else:                                                                                                                                                      
+              return self._jit_get_action_det(self._bundle_state, obs, self.action_scale, self.action_bias)
+        
+        should_explore = bool(jax.random.uniform(decision_key) < self.explore_prob) and not deterministic
+        return self._jit_get_action_sample(
+            self._bundle_state, obs, should_explore, key
         )
         
     def train_step(self) -> dict[str, float]:
         """One PB-SAC training step."""
+        # Pre-generate all PRNG keys with one split to save per-call dispatch overhead.
         metrics = {}
+        all_keys    = self._next_n_keys(self.train_freq + self.gradient_steps)
+        action_keys = all_keys[:self.train_freq]
+        update_keys = all_keys[self.train_freq:]
 
+        rollout_metrics = self.collect_rollouts(self.train_freq, action_keys=action_keys)
+        if self.global_step < self.learning_starts:
+            return rollout_metrics
+
+        metrics.update(rollout_metrics)
+        
         if self.actor_frozen and self.global_step >= self.actor_freeze_until:
             self.actor_frozen = False
-
-        metrics.update(self.collect_rollouts(self.train_freq))
-
-        if self.global_step < self.learning_starts:
-            return metrics
 
         self.explore_prob = max(
             self.explore_prob_final,
@@ -382,66 +495,43 @@ class PBSAC(SAC):
                   / max(1, self.total_timesteps - self.learning_starts) * self.explore_prob_decay_duration
         )
 
-        data = self.replay_buffer.sample(self.batch_size)
-        key  = self._next_key()
-
-        if self.actor_frozen:
-            target_q = compute_posterior_guided_targets_vmap(
-                self.posterior, self.actor,
-                self.target_critic1, self.target_critic2, self.log_alpha,
-                data.next_observations, data.rewards, data.dones,
-                self.gamma, self.adaptation_samples, key, self.is_discrete,
-                self.action_scale, self.action_bias,
-            )
-            if self.is_discrete:
-                sac_metrics = adaptive_update_discrete_critics(
-                    self.critic1, self.critic2,
-                    self.critic1_optimizer, self.critic2_optimizer,
-                    data.observations, data.actions, target_q,
+        for _gi in range(self.gradient_steps):
+            data = self.replay_buffer.sample(self.batch_size)
+            if self.actor_frozen:
+                self._bundle_state, sac_metrics = self._jit_adaptive_update_critics(
+                    self._bundle_state,
+                    data.observations, data.actions, data.rewards, data.next_observations, data.dones,
+                    self.gamma, update_keys[_gi],
                 )
             else:
-                sac_metrics = adaptive_update_continuous_critics(
-                    self.critic1, self.critic2,
-                    self.critic1_optimizer, self.critic2_optimizer,
-                    data.observations, data.actions, target_q,
-                )
-        else:
-            if self.is_discrete:
-                sac_metrics = update_discrete(
-                    self.actor, self.critic1, self.critic2,
-                    self.target_critic1, self.target_critic2,
-                    self.actor_optimizer, self.critic1_optimizer, self.critic2_optimizer,
-                    self.log_alpha, self.alpha_optimizer,
-                    data.observations, data.actions, data.rewards,
-                    data.next_observations, data.dones,
-                    self.gamma, self.target_entropy, key,
-                )
-            else:
-                sac_metrics = update_continuous_critics(
-                    self.actor, self.critic1, self.critic2,
-                    self.target_critic1, self.target_critic2,
-                    self.critic1_optimizer, self.critic2_optimizer,
-                    data.observations, data.actions, data.rewards,
-                    data.next_observations, data.dones,
-                    self.log_alpha, self.gamma,
-                    self.action_scale, self.action_bias, key,
-                )
-                if self.global_step % self.policy_frequency == 0:
-                    for _ in range(self.policy_frequency):
-                        key = self._next_key()
-                        actor_alpha_metrics = update_continuous_actor_alpha(
-                            self.actor, self.critic1, self.critic2,
-                            self.actor_optimizer, self.log_alpha, self.alpha_optimizer,
-                            data.observations, self.action_scale, self.action_bias,
-                            self.autotune_alpha, self.target_entropy, key,
-                        )
-                        sac_metrics.update(actor_alpha_metrics)
+                if self.is_discrete:
+                    self._bundle_state, sac_metrics = self._jit_update(
+                        self._bundle_state,
+                        data.observations, data.actions, data.rewards,
+                        data.next_observations, data.dones,
+                        self.gamma, self.target_entropy, update_keys[_gi],
+                    )
+                else:
+                    self._bundle_state, sac_metrics = self._jit_update_critics(
+                        self._bundle_state,
+                        data.observations, data.actions, data.rewards,
+                        data.next_observations, data.dones,
+                        self.gamma, self.action_scale, self.action_bias, update_keys[_gi],
+                    )
+                    if self.global_step % self.policy_frequency == 0:
+                        actor_keys = self._next_n_keys(self.policy_frequency)
+                        for actor_key in actor_keys:
+                            self._bundle_state, actor_metrics = self._jit_update_actor_alpha(
+                                self._bundle_state,
+                                data.observations, self.action_scale, self.action_bias,
+                                self.target_entropy, actor_key,
+                            )
+                            sac_metrics.update(actor_metrics)
 
         metrics.update(sac_metrics)
 
         if self.global_step % self.target_update_interval == 0:
-            soft_update(self.critic1, self.target_critic1, self.tau)
-            soft_update(self.critic2, self.target_critic2, self.tau)
+            self._bundle_state = self._jit_soft_update(self._bundle_state, self.tau)
 
         self._sync_posterior_mean_from_actor()
 
@@ -471,7 +561,7 @@ class PBSAC(SAC):
             self.last_pb_metrics['pac_bayes/time_s'] = time.time() - t0
 
         if self.global_step % self.pb_reset_prior_freq == 0:
-            self.prior = self.prior.ema_update(self.posterior, self.pb_prior_decay)
+            self._bundle_state = self._jit_prior_ema_update(self._bundle_state)
 
         metrics['pac_bayes/r_max']        = self.r_max
         metrics['pac_bayes/mixing_time']  = self.mixing_time

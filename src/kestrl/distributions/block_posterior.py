@@ -74,18 +74,6 @@ class BlockPrior(nnx.Module):
                     for name, lp in posterior.layers.items()}
         )
 
-    def ema_update(self, posterior: BlockPosterior, decay: float = 0.99) -> 'BlockPrior':
-        """Slide prior toward posterior: μ₀ ← ι·υ + (1-ι)·μ₀ (Algorithm 1)."""
-        return BlockPrior(
-            layers={
-                name: (
-                    decay * posterior.layers[name].mean.get_value() + (1 - decay) * m0,
-                    decay * posterior.layers[name].std  + (1 - decay) * s0,
-                )
-                for name, (m0, s0) in self.layers.items()
-            }
-        )
-
 
 # ---------------------------------------------------------------------------
 # Functional API — pure functions, JIT-able
@@ -106,7 +94,18 @@ def block_sample(posterior: BlockPosterior, key: jax.Array) -> dict:
         sampled[name] = m + s * eps_diag + p @ eps_lr
     return sampled
 
-def _construct_state_from_flat_state(network: nnx.Module, sampled_flat_state: dict, shapes: dict) -> dict:
+def ema_update_prior(prior: BlockPrior, posterior: BlockPosterior, decay: float = 0.99) -> 'BlockPrior':
+        """Slide prior toward posterior: μ₀ ← ι·υ + (1-ι)·μ₀ (Algorithm 1)."""
+        prior.layers = {
+            name: (
+                decay * posterior.layers[name].mean.get_value() + (1 - decay) * m0,
+                decay * posterior.layers[name].std  + (1 - decay) * s0,
+            )
+            for name, (m0, s0) in prior.layers.items()
+        }
+        return prior
+
+def _construct_state_from_flat_state(sampled_flat_state: dict, shapes: dict) -> dict:
     """Temporarily injects sampled parameters into the actor network."""
     new_flat = {path: sampled_flat_state[path].reshape(shapes[path]) for path in sampled_flat_state}
     state = nnx.from_flat_state(new_flat)

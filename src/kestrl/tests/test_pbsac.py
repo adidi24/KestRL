@@ -414,7 +414,7 @@ def test_posterior_actor_synchronization():
 
 # ── Tests for compute_posterior_guided_targets (Task 5.6) ─────────────────────
 
-from kestrl.algorithms.pbsac.losses import compute_posterior_guided_targets
+from kestrl.algorithms.pbsac.functions import compute_posterior_guided_targets
 
 def test_posterior_guided_targets_shape_and_validity():
     """Output is (B,), finite, no nan/inf."""
@@ -608,11 +608,11 @@ def test_adaptive_discrete_critic_update_modifies_params():
 
 # ── Tests for UCB action selection (Task 5.8) ─────────────────────────────────
 
-from kestrl.algorithms.pbsac.losses import (
+from kestrl.algorithms.pbsac.functions import (
     get_continuous_actor_action_from_posterior,
     get_discrete_actor_action_from_posterior,
 )
-from kestrl.algorithms.sac.losses import get_continuous_actor_action
+from kestrl.algorithms.sac.functions import get_continuous_actor_action
 
 def test_ucb_explore_prob_zero_returns_standard_action():
     """explore_prob=0.0 always takes the standard SAC path (no posterior sampling)."""

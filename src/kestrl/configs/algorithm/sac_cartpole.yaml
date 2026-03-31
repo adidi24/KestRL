@@ -13,9 +13,9 @@ critic_network:
   activation: relu
 
 # Core hyperparameters
-total_timesteps: 100000
+total_timesteps: 500000
 buffer_size: 100000
-learning_starts: 2000
+learning_starts: 10000
 batch_size: 128
 train_freq: 10
 target_update_interval: 500
@@ -30,5 +30,5 @@ lr_alpha: 1e-3
 
 # Entropy
 autotune_alpha: true
-target_entropy_ratio: 0.25 # reduces over-exploration in SAC for small discrete envs like CartPole
+target_entropy_ratio: 0.10 # reduces over-exploration in SAC for small discrete envs like CartPole
 alpha: 0.2 # used only when autotune_alpha=false

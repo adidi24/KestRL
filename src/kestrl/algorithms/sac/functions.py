@@ -124,7 +124,6 @@ def compute_continuous_actor_loss(
     return actor_loss
 
 # ── Get action ────────────────────────────────
-@nnx.jit
 def get_continuous_actor_action(
     actor: nnx.Module,
     obs: jax.Array,
@@ -148,7 +147,6 @@ def get_continuous_actor_action(
     mean = jnp.tanh(mean) * action_scale + action_bias
     return action, log_prob, mean
 
-@nnx.jit
 def get_discrete_actor_action(
     actor: nnx.Module,
     obs: jax.Array,
@@ -184,7 +182,7 @@ def get_continuous_action_log_prob(
     
     log_prob = normal.log_prob(raw_action)
     log_prob -= jnp.log(action_scale * (1 - unscaled_action ** 2) + 1e-6)
-    log_prob = jnp.sum(log_prob, axis=1, keepdims=True)
+    log_prob = jnp.sum(log_prob, axis=1)
     return log_prob
 
 def get_discrete_action_log_prob(

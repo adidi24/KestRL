@@ -31,7 +31,7 @@ from kestrl.algorithms.sac.updates import (
     _make_frozen_continuous_update,
     _make_frozen_discrete_update,
     _make_frozen_soft_update,
-    _make_frozen_get_action,
+    _make_frozen_continuous_get_action,
     _make_frozen_discrete_get_action,
 )
 
@@ -46,7 +46,7 @@ class LogAlpha(nnx.Module):
 
 
 class _SACBundle(nnx.Module):
-    """Thin container so NNX can split all continuous SAC modules in one call."""
+    """Thin container so NNX can split all SAC modules in one call."""
     pass
 
 
@@ -203,7 +203,7 @@ class SAC(BaseAlgorithm):
             _make_frozen_continuous_update(self._bundle_gd, self.autotune_alpha)
         self._jit_soft_update = _make_frozen_soft_update(self._bundle_gd)
         self._jit_get_action_sample, self._jit_get_action_det = \
-            _make_frozen_get_action(self._bundle_gd)
+            _make_frozen_continuous_get_action(self._bundle_gd)
 
         del (self.actor, self.actor_optimizer,
              self.critic1, self.critic1_optimizer,
@@ -356,13 +356,9 @@ class SAC(BaseAlgorithm):
 
     def train_step(self):
         # Pre-generate all PRNG keys with one split to save per-call dispatch overhead.
-        if self.is_discrete:
-            action_keys = self._next_n_keys(self.train_freq)
-            critic_keys = None
-        else:
-            all_keys    = self._next_n_keys(self.train_freq + self.gradient_steps)
-            action_keys = all_keys[:self.train_freq]
-            critic_keys = all_keys[self.train_freq:]
+        all_keys    = self._next_n_keys(self.train_freq + self.gradient_steps)
+        action_keys = all_keys[:self.train_freq]
+        update_keys = all_keys[self.train_freq:]
 
         rollout_metrics = self.collect_rollouts(self.train_freq, action_keys=action_keys)
         if self.global_step < self.learning_starts:
@@ -376,14 +372,14 @@ class SAC(BaseAlgorithm):
                     self._bundle_state,
                     data.observations, data.actions, data.rewards,
                     data.next_observations, data.dones,
-                    self.gamma, self.target_entropy,
+                    self.gamma, self.target_entropy, update_keys[_gi],
                 )
             else:
                 self._bundle_state, metrics = self._jit_update_critics(
                     self._bundle_state,
                     data.observations, data.actions, data.rewards,
                     data.next_observations, data.dones,
-                    self.gamma, self.action_scale, self.action_bias, critic_keys[_gi],
+                    self.gamma, self.action_scale, self.action_bias, update_keys[_gi],
                 )
                 if self.global_step % self.policy_frequency == 0:
                     actor_keys = self._next_n_keys(self.policy_frequency)
@@ -414,22 +410,7 @@ class SAC(BaseAlgorithm):
         ckpt_dir = Path(path).resolve()
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        if self._frozen:
-            arrays = {'bundle': self._bundle_state}
-        else:
-            arrays = {
-                'actor':          nnx.state(self.actor),
-                'critic1':        nnx.state(self.critic1),
-                'critic2':        nnx.state(self.critic2),
-                'target_critic1': nnx.state(self.target_critic1),
-                'target_critic2': nnx.state(self.target_critic2),
-                'log_alpha':      nnx.state(self.log_alpha),
-                'actor_opt':      self.actor_optimizer.opt_state,
-                'critic1_opt':    self.critic1_optimizer.opt_state,
-                'critic2_opt':    self.critic2_optimizer.opt_state,
-            }
-            if self.autotune_alpha:
-                arrays['alpha_opt'] = self.alpha_optimizer.opt_state
+        arrays = {'bundle': self._bundle_state}
 
         checkpointer = ocp.StandardCheckpointer()
         checkpointer.save(ckpt_dir / 'arrays', arrays)
@@ -443,41 +424,10 @@ class SAC(BaseAlgorithm):
         """Restore from a checkpoint created by save()."""
         ckpt_dir = Path(path).resolve()
 
-        if self._frozen:
-            abstract = {'bundle': self._bundle_state}
-            restored = ocp.StandardCheckpointer().restore(
-                ckpt_dir / 'arrays', target=abstract)
-            self._bundle_state = restored['bundle']
-        else:
-            abstract = {
-                'actor':          nnx.state(self.actor),
-                'critic1':        nnx.state(self.critic1),
-                'critic2':        nnx.state(self.critic2),
-                'target_critic1': nnx.state(self.target_critic1),
-                'target_critic2': nnx.state(self.target_critic2),
-                'log_alpha':      nnx.state(self.log_alpha),
-                'actor_opt':      self.actor_optimizer.opt_state,
-                'critic1_opt':    self.critic1_optimizer.opt_state,
-                'critic2_opt':    self.critic2_optimizer.opt_state,
-            }
-            if self.autotune_alpha:
-                abstract['alpha_opt'] = self.alpha_optimizer.opt_state
-
-            restored = ocp.StandardCheckpointer().restore(
-                ckpt_dir / 'arrays', target=abstract)
-
-            nnx.update(self.actor,          restored['actor'])
-            nnx.update(self.critic1,        restored['critic1'])
-            nnx.update(self.critic2,        restored['critic2'])
-            nnx.update(self.target_critic1, restored['target_critic1'])
-            nnx.update(self.target_critic2, restored['target_critic2'])
-            nnx.update(self.log_alpha,      restored['log_alpha'])
-
-            self.actor_optimizer.opt_state   = restored['actor_opt']
-            self.critic1_optimizer.opt_state = restored['critic1_opt']
-            self.critic2_optimizer.opt_state = restored['critic2_opt']
-            if self.autotune_alpha and 'alpha_opt' in restored:
-                self.alpha_optimizer.opt_state = restored['alpha_opt']
+        abstract = {'bundle': self._bundle_state}
+        restored = ocp.StandardCheckpointer().restore(
+            ckpt_dir / 'arrays', target=abstract)
+        self._bundle_state = restored['bundle']
 
         with open(ckpt_dir / 'metadata.json') as f:
             meta = json.load(f)

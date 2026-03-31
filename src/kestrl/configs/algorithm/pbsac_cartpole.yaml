@@ -1,60 +1,61 @@
 _target_: kestrl.algorithms.pbsac.PBSAC
 name: pbsac
 
-# Network architecture — _partial_=True in _build_networks() injects obs_dim/action_dim/rngs
+# Network architecture
 actor_network:
-  _target_: kestrl.networks.MultiHeadMLP
-  hidden_dims: [256, 256]
+  _target_: kestrl.networks.MLP
+  hidden_dims: [64]
   activation: relu
 
 critic_network:
   _target_: kestrl.networks.MLP
-  hidden_dims: [256, 256]
+  hidden_dims: [64]
   activation: relu
 
 # Core hyperparameters
-total_timesteps: 1000000
-buffer_size: 1000000
-learning_starts: 5000
-batch_size: 256
-train_freq: 1
-target_update_interval: 1
-policy_frequency: 2
+total_timesteps: 500000
+buffer_size: 100000
+learning_starts: 10000
+batch_size: 128
+train_freq: 10
+target_update_interval: 500
+policy_frequency: 1
 gamma: 0.99
 tau: 0.005
 
 # Learning rates
-lr_actor: 3e-4
+lr_actor: 2.5e-4
 lr_critic: 1e-3
-lr_alpha: 3e-4
+lr_alpha: 1e-3
 
 # Entropy
 autotune_alpha: true
+target_entropy_ratio: 0.05 # reduces over-exploration in SAC for small discrete envs like CartPole
 alpha: 0.2 # used only when autotune_alpha=false
 
 # PAC-Bayes specific parameters
 pac_bayes_active: true
 pb_num_envs: 10
-pb_update_freq: 20000 # Update frequency of PAC-Bayes components
+pb_update_freq: 10000 # Update frequency of PAC-Bayes components
 delta: 0.05 # failure probability in PAC-Bayes bound
 r_max_estimate: 10.0 # Conservative estimate
 mixing_time: 200 # Conservative estimate
 pb_rollout_trajectories: 20
-pb_rollout_steps: 1000
+pb_rollout_steps: 500
 pb_policy_samples: 16 # Samples for estimation
-pb_update_epochs: 100 # Optimization epochs
+pb_update_epochs: 50 # Optimization epochs
 pb_reset_prior_freq: 10 # EMA-style prior reset frequency
 pb_prior_decay: 0.99 # Decay factor for prior
 pb_init_std: 0.01 # Initial std for posterior
-pb_posterior_lr: 1e-3 # Learning rate for posterior optimization
+pb_posterior_lr: 2.5e-4 # Learning rate for posterior optimization
 pb_rank: 15 # Low-rank dimension for covariance
 
 # Actor freezing for stability after PAC-Bayes updates
-actor_freeze_steps: 20 # Steps to freeze actor after PB update
-adaptation_samples: 256 # Samples during critic adaptation
+actor_freeze_steps: 10 # Steps to freeze actor after PB update
+adaptation_samples: 512 # Samples during critic adaptation
 
 # Posterior-guided exploration
 explore_prob_init: 0.0 # Used for UCB exploration scheduling
 explore_prob_final: 0.0 # Used for UCB exploration scheduling
 explore_prob_decay_duration: 0.5 # Duration of explore_prob decay
-explore_n_samples: 4 # Policies sampled for UCB check
+explore_n_samples: 8 # Policies sampled for UCB check

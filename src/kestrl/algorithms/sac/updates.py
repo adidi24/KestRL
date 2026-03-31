@@ -10,34 +10,20 @@ import jax.numpy as jnp
 from flax import nnx
 from distrax import Categorical, Normal
 
-from kestrl.algorithms.sac.losses import (
+from kestrl.algorithms.sac.functions import (
     LOG_STD_MAX,
     LOG_STD_MIN,
     compute_continuous_critic_loss,
+    compute_discrete_critic_loss,
+    compute_continuous_actor_loss,
+    compute_discrete_actor_loss,
+    get_continuous_actor_action,
+    get_discrete_actor_action,
 )
 
 
 def _make_frozen_continuous_update(bundle_gd, autotune_alpha: bool):
-    """Return (update_critics_fn, update_actor_alpha_fn).
-
-    Mirrors cleanRL's policy_frequency pattern:
-      update_critics_fn    — called every gradient step
-      update_actor_alpha_fn — called policy_frequency times every policy_frequency steps
-    """
-
-    def _actor_fwd(actor, ob, action_scale, action_bias, key):
-        logits = actor(ob)
-        mean = logits['mean']
-        log_std = jnp.clip(logits['log_std'], LOG_STD_MIN, LOG_STD_MAX)
-        std = jnp.exp(log_std)
-        normal = Normal(mean, std)
-        x_t = normal.sample(seed=key)
-        y_t = jnp.tanh(x_t)
-        action = y_t * action_scale + action_bias
-        log_prob = normal.log_prob(x_t)
-        log_prob -= jnp.log(action_scale * (1 - y_t ** 2) + 1e-6)
-        log_prob = jnp.sum(log_prob, axis=1, keepdims=True)
-        return action, log_prob
+    """Return (update_critics_fn, update_actor_alpha_fn)."""
 
     @jax.jit
     def _update_critics(
@@ -48,7 +34,7 @@ def _make_frozen_continuous_update(bundle_gd, autotune_alpha: bool):
         b = nnx.merge(bundle_gd, bundle_state)
         alpha = jnp.exp(b.log_alpha.value[...])
 
-        next_act, next_log_pi = _actor_fwd(b.actor, next_obs, action_scale, action_bias, key)
+        next_act, next_log_pi, _ = get_continuous_actor_action(b.actor, next_obs, action_scale, action_bias, key)
         tq_input = jnp.concatenate([next_obs, next_act], axis=1)
         min_next_q = (
             jnp.minimum(b.target_critic1(tq_input), b.target_critic2(tq_input))
@@ -78,17 +64,14 @@ def _make_frozen_continuous_update(bundle_gd, autotune_alpha: bool):
         alpha = jnp.exp(b.log_alpha.value[...])
 
         def actor_loss_fn(actor):
-            act, log_p = _actor_fwd(actor, obs, action_scale, action_bias, key1)
-            ci = jnp.concatenate([obs, act], axis=1)
-            min_q = jnp.minimum(b.critic1(ci), b.critic2(ci))
-            return jnp.mean(alpha * log_p - min_q)
+            return compute_continuous_actor_loss(actor, b.critic1, b.critic2, obs, alpha, action_scale, action_bias, key1)
         actor_loss, actor_grads = nnx.value_and_grad(actor_loss_fn)(b.actor)
         b.actor_opt.update(b.actor, actor_grads)
 
         metrics = {'actor/loss': actor_loss}
 
         if autotune_alpha:
-            _, log_probs = _actor_fwd(b.actor, obs, action_scale, action_bias, key2)
+            _, log_probs, _ = get_continuous_actor_action(b.actor, obs, action_scale, action_bias, key2)
             def alpha_loss_fn(la):
                 return (-jnp.exp(la.value[...]) * (log_probs + target_entropy)).mean()
             alpha_loss, alpha_grads = nnx.value_and_grad(alpha_loss_fn)(b.log_alpha)
@@ -120,28 +103,17 @@ def _make_frozen_soft_update(bundle_gd):
     return _soft_update
 
 
-def _make_frozen_get_action(bundle_gd):
+def _make_frozen_continuous_get_action(bundle_gd):
     @jax.jit
     def _sample(bundle_state, obs, action_scale, action_bias, key):
         b = nnx.merge(bundle_gd, bundle_state)
-        logits = b.actor(obs)
-        mean = logits['mean']
-        log_std = jnp.clip(logits['log_std'], LOG_STD_MIN, LOG_STD_MAX)
-        std = jnp.exp(log_std)
-        normal = Normal(mean, std)
-        x_t = normal.sample(seed=key)
-        y_t = jnp.tanh(x_t)
-        action = y_t * action_scale + action_bias
-        log_prob = normal.log_prob(x_t)
-        log_prob -= jnp.log(action_scale * (1 - y_t ** 2) + 1e-6)
-        log_prob = jnp.sum(log_prob, axis=1, keepdims=True)
-        return action, log_prob, jnp.tanh(mean) * action_scale + action_bias
+        return get_continuous_actor_action(b.actor, obs, action_scale, action_bias, key)
 
     @jax.jit
     def _deterministic(bundle_state, obs, action_scale, action_bias):
         b = nnx.merge(bundle_gd, bundle_state)
         logits = b.actor(obs)
-        return jnp.tanh(logits['mean']) * action_scale + action_bias
+        return jnp.tanh(logits['mean']) * action_scale + action_bias, None, None
 
     return _sample, _deterministic
 
@@ -154,14 +126,13 @@ def _make_frozen_discrete_update(bundle_gd, autotune_alpha: bool):
     def _update(
         bundle_state,
         obs, actions, rewards, next_obs, dones,
-        gamma, target_entropy,
+        gamma, target_entropy, key,
     ):
         b = nnx.merge(bundle_gd, bundle_state)
         alpha = jnp.exp(b.log_alpha.value[...])
-
-        next_logits = b.actor(next_obs)
-        next_action_probs = jax.nn.softmax(next_logits, axis=1)
-        next_log_pi       = jax.nn.log_softmax(next_logits, axis=1)
+        key1, key2 = jax.random.split(key)
+        
+        next_action, next_log_pi, next_action_probs = get_discrete_actor_action(b.actor, next_obs, key1)
         min_next_q = (
             jnp.minimum(b.target_critic1(next_obs), b.target_critic2(next_obs))
             - alpha * next_log_pi
@@ -170,11 +141,9 @@ def _make_frozen_discrete_update(bundle_gd, autotune_alpha: bool):
         target_q = rewards.flatten() + (1 - dones.flatten()) * gamma * min_next_q
 
         def c1_loss(c1):
-            q_a = jnp.take_along_axis(c1(obs), actions.astype(jnp.int32), axis=1).reshape(-1)
-            return jnp.mean((q_a - target_q) ** 2)
+            return compute_discrete_critic_loss(c1, target_q, obs, actions)
         def c2_loss(c2):
-            q_a = jnp.take_along_axis(c2(obs), actions.astype(jnp.int32), axis=1).reshape(-1)
-            return jnp.mean((q_a - target_q) ** 2)
+            return compute_discrete_critic_loss(c2, target_q, obs, actions)
 
         q1_loss, g1 = nnx.value_and_grad(c1_loss)(b.critic1)
         q2_loss, g2 = nnx.value_and_grad(c2_loss)(b.critic2)
@@ -184,11 +153,7 @@ def _make_frozen_discrete_update(bundle_gd, autotune_alpha: bool):
         min_q_values = jnp.minimum(b.critic1(obs), b.critic2(obs))
 
         def actor_loss_fn(actor):
-            logits = actor(obs)
-            action_probs = jax.nn.softmax(logits, axis=1)
-            log_prob     = jax.nn.log_softmax(logits, axis=1)
-            loss = (action_probs * (alpha * log_prob - min_q_values)).mean()
-            return loss, (log_prob, action_probs)
+            return compute_discrete_actor_loss(actor, min_q_values, obs, alpha, key2)
 
         (actor_loss, (log_prob, action_probs)), actor_grads = nnx.value_and_grad(
             actor_loss_fn, has_aux=True)(b.actor)
@@ -216,16 +181,11 @@ def _make_frozen_discrete_get_action(bundle_gd):
     @jax.jit
     def _sample(bundle_state, obs, key):
         b = nnx.merge(bundle_gd, bundle_state)
-        logits = b.actor(obs)
-        policy_dist  = Categorical(logits=logits)
-        action       = policy_dist.sample(seed=key)
-        action_probs = policy_dist.probs
-        log_prob     = jax.nn.log_softmax(logits, axis=1)
-        return action, log_prob, action_probs
+        return get_discrete_actor_action(b.actor, obs, key)
 
     @jax.jit
     def _deterministic(bundle_state, obs):
         b = nnx.merge(bundle_gd, bundle_state)
-        return jnp.argmax(b.actor(obs), axis=-1)
+        return jnp.argmax(b.actor(obs), axis=-1), None, None
 
     return _sample, _deterministic

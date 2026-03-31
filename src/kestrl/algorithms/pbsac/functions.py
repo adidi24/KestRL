@@ -8,7 +8,7 @@ They take network state + data → return (loss, metrics).
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from kestrl.algorithms.sac.losses import (
+from kestrl.algorithms.sac.functions import (
     get_discrete_action_log_prob,
     get_continuous_action_log_prob,
     get_discrete_actor_action,
@@ -80,13 +80,13 @@ def compute_pac_bayes_loss(
     estimated_returns = []
     current_key = key
     
+    graphdef, _ = nnx.split(actor)
     for _ in range(num_samples):
         current_key, sub_key = jax.random.split(current_key)
-        flat_state = block_sample(posterior, sub_key)
+        sampled_flat_state = block_sample(posterior, sub_key)
         
-        actor_state = _construct_state_from_flat_state(actor, flat_state, posterior.shapes)
-        graphdef, _ = nnx.split(actor)
-        temp_actor = nnx.merge(graphdef, actor_state)
+        sampled_actor_state = _construct_state_from_flat_state(sampled_flat_state, posterior.shapes)
+        temp_actor = nnx.merge(graphdef, sampled_actor_state)
         
         ret = compute_policy_is_return(
             temp_actor, is_discrete, batch_data
@@ -108,7 +108,7 @@ def compute_pac_bayes_loss(
         'lambda': lambda_val
     }
 
-@nnx.jit(static_argnames=('is_discrete', 'num_samples'))
+
 def compute_pac_bayes_bound(
     posterior: BlockPosterior,
     prior: BlockPrior,
@@ -129,12 +129,12 @@ def compute_pac_bayes_bound(
     estimated_returns = []
     current_key = key
     
+    graphdef, _ = nnx.split(actor)
     for _ in range(num_samples):
         current_key, sub_key = jax.random.split(current_key)
         flat_state = block_sample(posterior, sub_key)
         
-        actor_state = _construct_state_from_flat_state(actor, flat_state, posterior.shapes)
-        graphdef, _ = nnx.split(actor)
+        actor_state = _construct_state_from_flat_state(flat_state, posterior.shapes)
         temp_actor = nnx.merge(graphdef, actor_state)
         
         ret = compute_policy_is_return(
@@ -166,74 +166,16 @@ def compute_pac_bayes_bound(
         'r_max': r_max,
     }
 
-@nnx.jit(static_argnames=('is_discrete', 'n_samples'))  
-def compute_posterior_guided_targets_vmap(
-    posterior: BlockPosterior,
-    actor: nnx.Module,
-    target_critic1: nnx.Module,
-    target_critic2: nnx.Module,
-    log_alpha: nnx.Module,
-    next_obs: jnp.ndarray,    # (B, obs_dim)
-    rewards: jnp.ndarray,     # (B,) or (B, 1)
-    dones: jnp.ndarray,       # (B,) or (B, 1)
-    gamma: float,
-    n_samples: int,
-    key: jax.Array,
-    is_discrete: bool,
-    # Continuous only:
-    action_scale: jnp.ndarray | None = None,
-    action_bias: jnp.ndarray | None = None,
-) -> jnp.ndarray:             # (B,) — averaged target_q
-    """Average TD targets over n_samples policies drawn from the posterior.
-    
-    This is used during the critic adaptation phase when the actor is frozen."""
-    alpha = jnp.exp(log_alpha.value[...])
-    graphdef, _ = nnx.split(actor)
-    
-    def sample_and_apply(key):
-        sub_key1, sub_key2 = jax.random.split(key)
-        flat_state = block_sample(posterior, sub_key1)
-        actor_state = _construct_state_from_flat_state(actor, flat_state, posterior.shapes)
-        temp_actor = nnx.merge(graphdef, actor_state)
-        if is_discrete:
-            _, next_log_pi, next_action_probs = get_discrete_actor_action(temp_actor, next_obs, sub_key2)
-            min_next_q = jnp.minimum(
-                target_critic1(next_obs), target_critic2(next_obs)
-            ) - alpha * next_log_pi
-            min_next_q = jnp.sum(next_action_probs * min_next_q, axis=1)
-            return min_next_q
-        else:
-            next_action, next_log_pi, _ = get_continuous_actor_action(
-                temp_actor, next_obs, action_scale, action_bias, sub_key2
-            )
-            critics_input = jnp.concatenate([next_obs, next_action], axis=1)
-            min_next_q = jnp.minimum(
-                target_critic1(critics_input),
-                target_critic2(critics_input),
-            ) - alpha * next_log_pi
-            return min_next_q.reshape(-1)
-        
-    keys = jax.random.split(key, n_samples)
-    td_terms = jax.vmap(sample_and_apply)(keys)
-    target_q = rewards.flatten() + (1 - dones.flatten()) * gamma * jnp.mean(td_terms, axis=0)
-    return target_q
-    
-
 # ── Get action ────────────────────────────────
 
-@nnx.jit(static_argnames=('should_explore', 'explore_n_samples', 'is_discrete', 'deterministic'))
-def get_actor_action_from_posterior_vmap(
+def get_actor_discrete_action_from_posterior_vmap(
     posterior: BlockPosterior,
     actor: nnx.Module,
     critic1: nnx.Module,
     critic2: nnx.Module,
     obs: jax.Array,
-    action_scale: jax.Array,
-    action_bias: jax.Array,
     should_explore: bool,
     explore_n_samples: int,
-    is_discrete: bool,
-    deterministic: bool,
     key: jax.Array,
 ) -> tuple[jax.Array, dict]:
     
@@ -243,25 +185,15 @@ def get_actor_action_from_posterior_vmap(
         def sample_and_apply(key):
             sub_key1, sub_key2 = jax.random.split(key)
             flat_state = block_sample(posterior, sub_key1)
-            actor_state = _construct_state_from_flat_state(actor, flat_state, posterior.shapes)
+            actor_state = _construct_state_from_flat_state(flat_state, posterior.shapes)
             temp_actor = nnx.merge(graphdef, actor_state)
-            if is_discrete:
-                action, log_prob, action_probs = get_discrete_actor_action(temp_actor, obs, sub_key2)
-                q_values = jnp.minimum(
-                    critic1(obs), critic2(obs)
-                )
-                q_value = jnp.take_along_axis(q_values, action.reshape(-1, 1).astype(jnp.int32), axis=1).reshape(-1)  
-                return {'q_values': q_value, 'action': action, 'log_prob': log_prob, 'aux': action_probs}
-            else:
-                action, log_prob, mean = get_continuous_actor_action(
-                    temp_actor, obs, action_scale, action_bias, sub_key2
-                )
-                critics_input = jnp.concatenate([obs, action], axis=1)
-                q_values = jnp.minimum(
-                    critic1(critics_input),
-                    critic2(critics_input),
-                )
-                return {'q_values': q_values.reshape(-1), 'action': action, 'log_prob': log_prob, 'aux': mean}
+
+            action, log_prob, action_probs = get_discrete_actor_action(temp_actor, obs, sub_key2)
+            q_values = jnp.minimum(
+                critic1(obs), critic2(obs)
+            )
+            q_value = jnp.take_along_axis(q_values, action.reshape(-1, 1).astype(jnp.int32), axis=1).reshape(-1)  
+            return {'q_values': q_value, 'action': action, 'log_prob': log_prob, 'aux': action_probs}
             
         keys = jax.random.split(key, explore_n_samples)
         results = jax.vmap(sample_and_apply)(keys)
@@ -271,19 +203,54 @@ def get_actor_action_from_posterior_vmap(
         log_prob = results['log_prob'][best_idx, jnp.arange(best_idx.shape[0])]
         aux = results['aux'][best_idx, jnp.arange(best_idx.shape[0])]
     else:
-        if is_discrete:
-            if deterministic:
-                return jnp.argmax(actor(obs), axis=-1), None, None
-            action, log_prob, aux = get_discrete_actor_action(
-              actor, obs, key
-          )
-        else:
-            if deterministic:
-                logits = actor(obs)
-                mean = jnp.tanh(logits['mean']) * action_scale + action_bias
-                return mean, None, None
-            action, log_prob, aux = get_continuous_actor_action(
-                actor, obs, action_scale, action_bias, key
+        action, log_prob, aux = get_discrete_actor_action(
+            actor, obs, key
+        )
+
+    return action, log_prob, aux
+
+def get_actor_continuous_action_from_posterior_vmap(
+    posterior: BlockPosterior,
+    actor: nnx.Module,
+    critic1: nnx.Module,
+    critic2: nnx.Module,
+    obs: jax.Array,
+    action_scale: jax.Array,
+    action_bias: jax.Array,
+    should_explore: bool,
+    explore_n_samples: int,
+    key: jax.Array,
+) -> tuple[jax.Array, dict]:
+    
+    if should_explore:
+        graphdef, _ = nnx.split(actor)
+        
+        def sample_and_apply(key):
+            sub_key1, sub_key2 = jax.random.split(key)
+            flat_state = block_sample(posterior, sub_key1)
+            actor_state = _construct_state_from_flat_state(flat_state, posterior.shapes)
+            temp_actor = nnx.merge(graphdef, actor_state)
+
+            action, log_prob, mean = get_continuous_actor_action(
+                temp_actor, obs, action_scale, action_bias, sub_key2
             )
+            critics_input = jnp.concatenate([obs, action], axis=1)
+            q_values = jnp.minimum(
+                critic1(critics_input),
+                critic2(critics_input),
+            )
+            return {'q_values': q_values.reshape(-1), 'action': action, 'log_prob': log_prob, 'aux': mean}
+            
+        keys = jax.random.split(key, explore_n_samples)
+        results = jax.vmap(sample_and_apply)(keys)
+        best_idx = jnp.argmax(results['q_values'], axis=0)
+        
+        action = results['action'][best_idx, jnp.arange(best_idx.shape[0])]
+        log_prob = results['log_prob'][best_idx, jnp.arange(best_idx.shape[0])]
+        aux = results['aux'][best_idx, jnp.arange(best_idx.shape[0])]
+    else:
+        action, log_prob, aux = get_continuous_actor_action(
+            actor, obs, action_scale, action_bias, key
+        )
 
     return action, log_prob, aux
