@@ -1,93 +1,102 @@
 # KestRL (Kestrel)
 
-A modular reinforcement learning library built on [JAX](https://github.com/google/jax) and [Flax NNX](https://flax.readthedocs.io/en/latest/). Designed for clean algorithm implementations, reproducible research, and easy extension.
+KestRL is a JAX/Flax reinforcement learning library built around one idea: gradient updates should never wait on Python. It's designed for clean algorithm implementations, reproducible research, and easy extension.
 
-## Architecture
+Networks are defined with Flax NNX; full OOP, readable, composable. Before training starts, the entire model bundle is split into a static graph definition and a mutable state pytree. The graph definition is captured in a closure; only the state flows in and out of JIT. The result is zero retracing, zero Python overhead per gradient step.
 
-KestRL is organized around five decoupled layers:
+For Brax and MJX environments, this extends further: the rollout, buffer write, gradient update, and soft target update all fold into a single `lax.scan` kernel. Multi-seed training becomes `jax.vmap` over independent carries, multiple seeds run in one dispatch, with one host sync per epoch for logging.
 
+---
+
+## Two routes
+
+### Classic (Gymnasium)
+
+Standard Gymnasium environments, numpy replay buffer, JIT-compiled gradient updates. The env.step crosses Python; everything else doesn't.
+
+```python
+agent = SAC(env, algo_cfg, seed=0)
+trainer = Trainer(agent, config, writer=writer)
+trainer.train()
 ```
-Environments   →   clean factory/wrapper system, Hydra-composable
-Buffers        →   ReplayBuffer (off-policy), RolloutBuffer (on-policy, planned)
-Networks       →   MLP, MultiHeadMLP, ...
-Algorithms     →   BaseAlgorithm interface: train_step / get_action / evaluate / save / load
-Trainer        →   training loop, logging, evaluation — independent of algorithm
+
+### Compiled (Brax, MJX)
+
+Entire training loop on device — rollout, buffer write, gradient update, soft target update, all in one `lax.scan` kernel.
+
+```python
+trainer = CompiledTrainer(env, config, writer=writer)
+trainer.train(seed=0)                           # single seed, live progress
+trainer.train_seeds_live(num_seeds=10, seed=0)  # 10 seeds, vmapped epochs
 ```
 
-Algorithms only implement `train_step()`. The Trainer handles the loop, progress tracking, TensorBoard/W&B logging, and evaluation. Networks are configured via Hydra and instantiated with `_partial_=True`, so switching architectures (MLP → CNN) requires only a YAML change.
+Under the hood, both routes share the same frozen-bundle pattern:
+
+```python
+# define with NNX  readable, standard OOP
+self.actor  = MultiHeadMLP(obs_dim, head_configs, hidden_dims, rngs=rngs)
+self.critic = MLP(critic_in, 1, hidden_dims, rngs=rngs)
+
+# split once before training
+bundle_gd, bundle_state = nnx.split(bundle)
+
+# compile a pure update — bundle_gd is captured, never re-traced
+self._jit_update = _make_frozen_update(bundle_gd, ...)
+
+# each step: only state crosses the boundary
+bundle_state, metrics = self._jit_update(bundle_state, batch, key)
+```
+
+In the compiled route, `bundle_state` becomes a field in the `lax.scan` carry. Same pattern, different scope.
+
+---
 
 ## Installation
 
 ```bash
-git clone https://github.com/abdelkrimzitouni/KestRL.git
+git clone https://github.com/adidi24/KestRL.git
 cd KestRL
 uv sync
 ```
 
-Requires Python 3.10–3.12. JAX CPU backend is installed by default.
+Python 3.10–3.12. Ships with the JAX CPU backend; swap in `jax[cuda12]` or `jax[tpu]` for accelerators.
 
-## Quick Start
+## Quick start
 
 ```bash
-# SAC on HalfCheetah-v5 (continuous)
-python -m kestrl.experiments.run
+# SAC on HalfCheetah-v5
+uv run python -m kestrl.experiments.run
 
 # SAC on CartPole-v1 (discrete)
-python -m kestrl.experiments.run algorithm=sac_cartpole environment=cartpole
+uv run python -m kestrl.experiments.run algorithm=sac_cartpole environment=cartpole
 
-# Custom overrides
-python -m kestrl.experiments.run algorithm=sac_mujoco experiment.seed=42 experiment.track=true
+# Compiled SAC on Brax Ant, 4 seeds
+uv run python -m kestrl.experiments.run environment=brax algorithm=sac_mujoco experiment.num_seeds=4
 
-# Seed sweep (Hydra multirun)
-python -m kestrl.experiments.run -m experiment.seed=1,2,3 algorithm=sac_mujoco
+# W&B tracking
+uv run python -m kestrl.experiments.run experiment.track=true
 ```
 
-## Configuration
+Configuration via [Hydra](https://hydra.cc), config groups under `src/kestrl/configs/`.
 
-Experiments are configured via [Hydra](https://hydra.cc). Config groups:
+## Algorithms
 
-```
-src/kestrl/configs/
-├── config.yaml                  # root: composes algorithm + environment + experiment
-├── algorithm/
-│   ├── sac_mujoco.yaml          # SAC for continuous control
-│   ├── sac_cartpole.yaml        # SAC for discrete control
-│   └── pbsac_mujoco.yaml        # PB-SAC for continuous control
-├── environment/
-│   ├── mujoco.yaml
-│   └── cartpole.yaml
-└── experiment/
-    └── base.yaml                # seed, tracking, eval, checkpoint settings
-```
+| Algorithm | Discrete | Continuous | Route |
+| --------- | -------- | ---------- | ----- |
+| SAC | ✔ | ✔ | Classic + Compiled |
+| PB-SAC | ✔ | ✔ | Classic |
+| PPO | — | — | Planned |
 
-Network architecture is specified inside the algorithm config and instantiated at runtime:
+## Alternatives
 
-```yaml
-# algorithm/sac_mujoco.yaml
-actor_network:
-  _target_: kestrl.networks.MultiHeadMLP
-  hidden_dims: [256, 256]
-  activation: relu
-```
+**JAX**
+- [rejax](https://github.com/keraJLi/rejax) — same compiled-training idea, broader algorithm coverage (PPO, DQN, TD3, IQN, PQN), requires JAX-native environments
+- [PureJaxRL](https://github.com/luchris429/purejaxrl) — where the end-to-end JAX training idea started, single-file and easy to read
+- [Stoix](https://github.com/EdanToledo/Stoix) — distributed actor-learner on TPU/GPU clusters, serious scale
 
-Switching to a CNN actor later requires only changing `_target_` — no algorithm code changes.
-
-## Implemented Algorithms
-
-| Algorithm | Action space | Status |
-|-----------|-------------|--------|
-| SAC | Discrete + Continuous | Done |
-| PBSAC (PAC-Bayes SAC) | Discrete + Continuous | Done |
-| PPO | Discrete + Continuous | Planned |
-| DQN | Discrete | Planned |
-
-## Logging
-
-TensorBoard is enabled by default. W&B can be enabled via `experiment.track=true` (requires `WANDB_PROJECT` and `WANDB_ENTITY` in your `.env`).
-
-```bash
-tensorboard --logdir runs/
-```
+**PyTorch**
+- [CleanRL](https://github.com/vwxyzjn/cleanrl) — single-file implementations, the best place to read how an algorithm actually works
+- [Stable-Baselines3](https://github.com/DLR-RM/stable-baselines3) — the production standard
 
 ## License
 
