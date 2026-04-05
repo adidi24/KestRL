@@ -37,6 +37,14 @@ def get_env_builder() -> EnvironmentBuilder:
         except ImportError as e:
             logger.debug(f"Healthcare environments not available: {e}")
         
+        # Register Brax factory
+        try:
+            from .builders.brax_builder import BraxEnvironmentFactory
+            _global_env_builder.register_factory("brax", BraxEnvironmentFactory())
+            logger.info("Brax environment factory registered")
+        except ImportError:
+            logger.debug("Brax not available")
+
         # Add more factories as needed
     
     return _global_env_builder

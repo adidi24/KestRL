@@ -20,6 +20,10 @@ class BaseWrapper(gym.Wrapper):
     def step(self, action):
         """Step through the environment."""
         return self.env.step(action)
+    
+    @property                                                                                       
+    def is_discrete(self) -> bool:                          
+        return isinstance(self.single_action_space, gym.spaces.Discrete)  
 
 
 class ObservationWrapper(BaseWrapper):

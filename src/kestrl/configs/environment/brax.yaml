@@ -1,0 +1,11 @@
+# Brax physics environment
+# env_id must use the "brax/" prefix, stripped by BraxEnvironmentFactory before
+# passing to brax.envs.create(). Available envs: ant, hopper, humanoid,
+# halfcheetah, walker2d, reacher, pusher.
+#
+# num_envs drives Brax's internal batch_size, high counts are cheap because all
+# environments run in a single fused XLA program on the GPU.
+
+env_id: "brax/ant"
+num_envs: 1
+wrappers: [] # Gymnasium wrappers are not applicable to Brax envs

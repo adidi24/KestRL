@@ -102,22 +102,6 @@ def _make_frozen_soft_update(bundle_gd):
 
     return _soft_update
 
-
-def _make_frozen_continuous_get_action(bundle_gd):
-    @jax.jit
-    def _sample(bundle_state, obs, action_scale, action_bias, key):
-        b = nnx.merge(bundle_gd, bundle_state)
-        return get_continuous_actor_action(b.actor, obs, action_scale, action_bias, key)
-
-    @jax.jit
-    def _deterministic(bundle_state, obs, action_scale, action_bias):
-        b = nnx.merge(bundle_gd, bundle_state)
-        logits = b.actor(obs)
-        return jnp.tanh(logits['mean']) * action_scale + action_bias, None, None
-
-    return _sample, _deterministic
-
-
 def _make_frozen_discrete_update(bundle_gd, autotune_alpha: bool):
     """Discrete SAC update. No sampling needed — all expectations are over the
     full action distribution via softmax/log_softmax."""
@@ -176,6 +160,19 @@ def _make_frozen_discrete_update(bundle_gd, autotune_alpha: bool):
 
     return _update
 
+def _make_frozen_continuous_get_action(bundle_gd):
+    @jax.jit
+    def _sample(bundle_state, obs, action_scale, action_bias, key):
+        b = nnx.merge(bundle_gd, bundle_state)
+        return get_continuous_actor_action(b.actor, obs, action_scale, action_bias, key)
+
+    @jax.jit
+    def _deterministic(bundle_state, obs, action_scale, action_bias):
+        b = nnx.merge(bundle_gd, bundle_state)
+        logits = b.actor(obs)
+        return jnp.tanh(logits['mean']) * action_scale + action_bias, None, None
+
+    return _sample, _deterministic
 
 def _make_frozen_discrete_get_action(bundle_gd):
     @jax.jit

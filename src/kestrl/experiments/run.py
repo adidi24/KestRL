@@ -28,15 +28,12 @@ logging.getLogger('absl').setLevel(logging.WARNING)
 logging.getLogger('jax._src.xla_bridge').setLevel(logging.WARNING)
 
 from kestrl.environments.registry import get_env_builder
-from kestrl.trainers import Trainer
+from kestrl.environments.builders.brax_builder import BraxVectorEnv
+from kestrl.trainers import Trainer, CompiledTrainer
 
 
 def build_agent(env, cfg: DictConfig, seed: int):
-    """Instantiate algorithm from Hydra config.
-
-    Pops _target_ and name from the algorithm config, passes the rest
-    as a plain dict to the algorithm constructor.
-    """
+    """Instantiate a class-based algorithm (SAC, PBSAC, ...) from Hydra config."""
     algo_cfg = OmegaConf.to_container(cfg.algorithm, resolve=True)
     target = algo_cfg.pop('_target_')
     algo_cfg.pop('name', None)
@@ -47,8 +44,8 @@ def build_agent(env, cfg: DictConfig, seed: int):
 def main(cfg: DictConfig) -> None:
     print(OmegaConf.to_yaml(cfg))
 
-    seed = cfg.experiment.seed
-    env_id = cfg.environment.env_id
+    seed      = cfg.experiment.seed
+    env_id    = cfg.environment.env_id
     algo_name = cfg.algorithm.get('name', 'algorithm')
 
     # ── Environment ───────────────────────────────────────────
@@ -62,13 +59,12 @@ def main(cfg: DictConfig) -> None:
         wrappers=list(cfg.environment.get('wrappers', [])) or None,
     )
 
-    # ── Agent ─────────────────────────────────────────────────
-    agent = build_agent(env, cfg, seed=seed)
-
-    # ── Logging ───────────────────────────────────────────────
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # ── Logging setup ─────────────────────────────────────────
+    num_seeds   = cfg.experiment.get('num_seeds', 1)
+    timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
     env_id_safe = re.sub(r'[/\\]', '-', env_id)
-    run_name = f"{env_id_safe}_{algo_name}_seed{seed}_{timestamp}"
+    seed_tag    = f"x{num_seeds}seeds" if num_seeds > 1 else f"seed{seed}"
+    run_name    = f"{env_id_safe}_{algo_name}_{seed_tag}_{timestamp}"
 
     if cfg.experiment.get('track', False):
         import wandb
@@ -93,26 +89,54 @@ def main(cfg: DictConfig) -> None:
             if not isinstance(v, dict)
         ),
     )
-    agent.writer = writer
 
-    # ── Train ─────────────────────────────────────────────────
-    ckpt_base = cfg.experiment.get('checkpoint_dir', None)
-    trainer = Trainer(
-        algorithm=agent,
-        config={
-            'total_timesteps': cfg.algorithm.total_timesteps,
-            'eval_interval': cfg.experiment.get('eval_interval', None),
-            'eval_episodes': cfg.experiment.get('eval_episodes', 10),
-            'checkpoint_dir': f"{ckpt_base}/{run_name}" if ckpt_base else None,
-            'checkpoint_interval': cfg.experiment.get('checkpoint_interval', None),
-            'max_checkpoints': cfg.experiment.get('max_checkpoints', None),
-        },
-        writer=writer,
-    )
-    trainer.train()
+    # ── Train — Fully compiled functional path ────────────────────────────────────
+    if isinstance(env, BraxVectorEnv):
+        algo_cfg = OmegaConf.to_container(cfg.algorithm, resolve=True)
+        algo_cfg.pop('_target_', None)
+        algo_cfg.pop('name', None)
+        # Merge experiment-level logging/eval params into algo config
+        algo_cfg['log_interval'] = cfg.experiment.get('log_interval', 50)
+        algo_cfg['eval_interval'] = cfg.experiment.get('eval_interval', None)
+        algo_cfg['eval_episodes'] = cfg.experiment.get('eval_episodes', 100)
+
+        trainer = CompiledTrainer(
+            env,
+            algo_cfg,
+            writer=writer,
+            log_per_seed=num_seeds > 1,
+        )
+        if num_seeds > 1:
+            trainer.train_seeds_live(num_seeds, seed=seed)
+        else:
+            trainer.train(seed=seed)
+
+    # ── Train — class-based path (SAC, PBSAC, ...) ───────────
+    else:
+        agent = build_agent(env, cfg, seed=seed)
+        agent.writer = writer
+
+        ckpt_base = cfg.experiment.get('checkpoint_dir', None)
+        trainer = Trainer(
+            algorithm=agent,
+            config={
+                'total_timesteps':     cfg.algorithm.total_timesteps,
+                'eval_interval':       cfg.experiment.get('eval_interval', None),
+                'eval_episodes':       cfg.experiment.get('eval_episodes', 10),
+                'checkpoint_dir':      f"{ckpt_base}/{run_name}" if ckpt_base else None,
+                'checkpoint_interval': cfg.experiment.get('checkpoint_interval', None),
+                'max_checkpoints':     cfg.experiment.get('max_checkpoints', None),
+            },
+            writer=writer,
+        )
+        trainer.train()
 
     env.close()
     writer.close()
+
+    if cfg.experiment.get('track', False):
+        import wandb
+        wandb.finish()
 
 
 if __name__ == "__main__":
