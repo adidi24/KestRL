@@ -6,7 +6,7 @@ import jax
 
 from gymnasium import spaces
 
-from kestrl.buffers import ReplayBufferSamples
+from kestrl.buffers.types import ReplayBufferSamples
 
 try:
     # Check memory used by replay buffer when possible

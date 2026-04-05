@@ -235,9 +235,9 @@ def make_compiled_sac(env: BraxVectorEnv, config: dict) -> CompiledSACFunctions:
         new_step = carry.global_step + jnp.int32(train_freq * num_envs)
 
         # 3. Episode return tracking (independent of gradient update)
-        # trajectory.reward/done: (train_freq, num_envs)
-        step_reward    = trajectory.reward.sum(axis=0)            # (num_envs,)
-        any_done       = trajectory.done.any(axis=0)              # (num_envs,) bool
+        # trajectory.rewards/dones: (train_freq, num_envs)
+        step_reward    = trajectory.rewards.sum(axis=0)            # (num_envs,)
+        any_done       = trajectory.dones.any(axis=0)              # (num_envs,) bool
         new_ep         = carry.ep_return + step_reward            # (num_envs,)
         new_last_ep    = jnp.where(any_done, new_ep, carry.last_ep_return)
         next_ep        = jnp.where(any_done, jnp.zeros_like(new_ep), new_ep)

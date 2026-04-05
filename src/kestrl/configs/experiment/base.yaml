@@ -7,3 +7,7 @@ eval_episodes: 10
 checkpoint_dir: checkpoints
 checkpoint_interval: 100000
 max_checkpoints: 4
+
+# Multi-seed training
+num_seeds: 5
+log_interval: 5000

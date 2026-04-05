@@ -92,14 +92,16 @@ class EnvironmentBuilder:
     
     def _infer_factory(self, env_id: str) -> str:
         """Infer factory from environment ID pattern."""
-        if env_id.startswith("ALE/"):
+        if env_id.startswith("brax/"):
+            return "brax"
+        elif env_id.startswith("ALE/"):
             return "gym"
         elif env_id.startswith("mt-"):
             return "metaworld"
         elif env_id.startswith("dm_control/"):
             return "dm_control"
         else:
-            return "gym"  # Default to gym
+            return "gym"
     
     def _apply_wrappers(self, env: gym.Env, wrappers: List[Dict[str, Any]]) -> gym.Env:
         """Apply wrappers to environment."""

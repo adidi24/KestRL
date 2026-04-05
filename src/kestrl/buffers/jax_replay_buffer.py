@@ -3,7 +3,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from kestrl.buffers import ReplayBufferSamples
+from kestrl.buffers.types import ReplayBufferSamples
 
 class JAXTransition(NamedTuple):
     """Rollout output from lax.scan. Leaves: (train_freq, num_envs, *feature)."""
@@ -70,9 +70,9 @@ def _buffer_add(
     new_buf = JAXBufferState(
         observations = buf.observations.at[indices].set(trajectory.observations),
         next_observations = buf.next_observations.at[indices].set(trajectory.next_observations),
-        actions = buf.actions.at[indices].set(trajectory.action),
-        rewards = buf.rewards.at[indices].set(trajectory.reward),
-        dones = buf.dones.at[indices].set(trajectory.done),
+        actions = buf.actions.at[indices].set(trajectory.actions),
+        rewards = buf.rewards.at[indices].set(trajectory.rewards),
+        dones = buf.dones.at[indices].set(trajectory.dones),
     )
     new_pos  = (pos + train_freq) % rows
     new_full = full | ((pos + train_freq) >= rows)
