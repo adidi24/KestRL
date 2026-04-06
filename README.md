@@ -1,4 +1,26 @@
-# KestRL (Kestrel)
+<div style="display: flex; align-items: center">
+<div style="flex-shrink: 0.5; min-width: 30px; max-width: 150px; aspect-ratio: 1; margin-right: 15px">
+  <img src="src/images/KestRL.png" width="150" height="150" align="left"></img>
+</div>
+<div>
+  <h1>
+    KestRL (Kestrel)
+    <br>
+    <span style="font-size: large">JAX/Flax Reinforcement Learning: clean implementations, hardware-accelerated training.</span>
+    <br>
+    <a href="https://opensource.org/licenses/Apache-2.0">
+      <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0">
+    </a>
+    <a href="https://github.com/adidi24/KestRL">
+      <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
+    </a>
+    <a href="https://github.com/google/jax">
+      <img src="https://img.shields.io/badge/JAX-accelerated-9cf" alt="JAX">
+    </a>
+  </h1>
+</div>
+</div>
+<br>
 
 KestRL is a JAX/Flax reinforcement learning library built around one idea: gradient updates should never wait on Python. It's designed for clean algorithm implementations, reproducible research, and easy extension.
 
@@ -90,14 +112,16 @@ Configuration via [Hydra](https://hydra.cc), config groups under `src/kestrl/con
 ## Alternatives
 
 **JAX**
+
 - [rejax](https://github.com/keraJLi/rejax) — same compiled-training idea, broader algorithm coverage (PPO, DQN, TD3, IQN, PQN), requires JAX-native environments
 - [PureJaxRL](https://github.com/luchris429/purejaxrl) — where the end-to-end JAX training idea started, single-file and easy to read
 - [Stoix](https://github.com/EdanToledo/Stoix) — distributed actor-learner on TPU/GPU clusters, serious scale
 
 **PyTorch**
+
 - [CleanRL](https://github.com/vwxyzjn/cleanrl) — single-file implementations, the best place to read how an algorithm actually works
 - [Stable-Baselines3](https://github.com/DLR-RM/stable-baselines3) — the production standard
 
 ## License
 
-MIT
+Apache 2.0
