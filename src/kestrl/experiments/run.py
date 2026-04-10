@@ -18,6 +18,7 @@ import os
 import re
 import logging
 from datetime import datetime
+from importlib import import_module
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -95,14 +96,18 @@ def main(cfg: DictConfig) -> None:
         algo_cfg = OmegaConf.to_container(cfg.algorithm, resolve=True)
         algo_cfg.pop('_target_', None)
         algo_cfg.pop('name', None)
+        factory_path = algo_cfg.pop('compiled_factory')
+        module_path, fn_name = factory_path.rsplit('.', 1)
+        factory = getattr(import_module(module_path), fn_name)
         # Merge experiment-level logging/eval params into algo config
-        algo_cfg['log_interval'] = cfg.experiment.get('log_interval', 50)
+        algo_cfg['log_interval']  = cfg.experiment.get('log_interval', 50)
         algo_cfg['eval_interval'] = cfg.experiment.get('eval_interval', None)
         algo_cfg['eval_episodes'] = cfg.experiment.get('eval_episodes', 100)
 
         trainer = CompiledTrainer(
             env,
             algo_cfg,
+            fns_factory=factory,
             writer=writer,
             log_per_seed=num_seeds > 1,
         )

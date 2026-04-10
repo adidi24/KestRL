@@ -1,24 +1,27 @@
-"""Training controller for CompiledSAC.
+"""Training controller for compiled (lax.scan) algorithms.
 
-    trainer = CompiledTrainer(env, config, writer=writer)
+    trainer = CompiledTrainer(env, config, fns_factory=make_compiled_sac, writer=writer)
     carry = trainer.train(seed=0)                              # single seed, live progress
     all_carries, _ = trainer.train_seeds_live(num_seeds=8)    # multi-seed, vmapped epochs
+
+The algorithm is injected via fns_factory — any callable (env, config) -> NamedTuple
+with (train, init, step_epoch, evaluate) fields works. The factory is resolved from
+the compiled_factory key in the algorithm YAML by run.py.
 """
 
 import time
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import jax
 import jax.numpy as jnp
 import tqdm
 
-from kestrl.algorithms.sac.compiled.sac import make_compiled_sac, CompiledSACCarry, CompiledSACFunctions
 from kestrl.environments.builders.brax_builder import BraxVectorEnv
 
 
 class CompiledTrainer:
-    """Training controller for CompiledSAC.
+    """Algorithm-agnostic training controller for compiled (lax.scan) routes.
 
     writer accepts any object with add_scalar() (TensorboardX, wandb.run, etc.).
     log_per_seed writes per-seed curves under "seedN/key" alongside the cross-seed mean.
@@ -28,6 +31,7 @@ class CompiledTrainer:
         self,
         env: BraxVectorEnv,
         config: dict[str, Any],
+        fns_factory: Callable,
         *,
         writer=None,
         eval_env: BraxVectorEnv | None = None,
@@ -39,7 +43,7 @@ class CompiledTrainer:
         self.eval_env     = eval_env or env
         self.log_per_seed = log_per_seed
 
-        self._fns: CompiledSACFunctions = make_compiled_sac(env, config)
+        self._fns = fns_factory(env, config)
 
         self._train_freq      = config.get('train_freq', 1)
         self._num_envs        = env.num_envs
@@ -54,7 +58,7 @@ class CompiledTrainer:
 
     # ── Single-seed training ──────────────────────────────────────────────────
 
-    def train(self, seed: int = 0) -> CompiledSACCarry:
+    def train(self, seed: int = 0):
         """Single-seed training. Python epoch loop over step_epoch with live tqdm."""
         self.start_time = time.time()
         key   = jax.random.PRNGKey(seed)
@@ -66,7 +70,7 @@ class CompiledTrainer:
         last_return        = 0.0
         last_critic_loss   = 0.0
 
-        print(f"CompiledSAC — single seed {seed}")
+        print(f"Compiled — single seed {seed}")
         print(f"  {self._num_epochs} epochs × {self._log_interval} steps"
               f" × {self._train_freq * self._num_envs} env-steps/step"
               f" = {total_env_steps:,} env steps")
@@ -114,7 +118,7 @@ class CompiledTrainer:
         self,
         num_seeds: int,
         seed: int = 0,
-    ) -> tuple[CompiledSACCarry, dict]:
+    ) -> tuple[Any, dict]:
         """Multi-seed training via vmapped epoch loop. One D2H sync per epoch.
 
         all_carries has a leading num_seeds axis.
@@ -126,7 +130,7 @@ class CompiledTrainer:
         steps_per_epoch = self._log_interval * self._train_freq * self._num_envs
         total_env_steps = self._num_epochs * steps_per_epoch
 
-        print(f"CompiledSAC — {num_seeds} seeds (vmapped epochs)")
+        print(f"Compiled — {num_seeds} seeds (vmapped epochs)")
         print(f"  {self._num_epochs} epochs × {steps_per_epoch:,} env-steps/epoch per seed")
         print(f"  Compiling first epoch…")
 
@@ -217,7 +221,7 @@ class CompiledTrainer:
         self,
         num_seeds: int,
         seed: int = 0,
-    ) -> tuple[CompiledSACCarry, dict]:
+    ) -> tuple[Any, dict]:
         """Single-dispatch vmap: entire training in one jit(vmap(train)) call.
 
         No progress during the run. Use train_seeds_live for long runs.
@@ -225,7 +229,7 @@ class CompiledTrainer:
         self.start_time = time.time()
         keys = jax.random.split(jax.random.PRNGKey(seed), num_seeds)
 
-        print(f"CompiledSAC — {num_seeds} seeds (vmap), compiling…")
+        print(f"Compiled — {num_seeds} seeds (vmap), compiling…")
         t0 = time.time()
 
         all_carries, all_metrics = jax.jit(jax.vmap(self._fns.train))(keys)
@@ -329,7 +333,7 @@ class CompiledTrainer:
 
         self.writer.flush()
 
-    def _print_summary(self, carry: CompiledSACCarry, seed: int) -> None:
+    def _print_summary(self, carry: Any, seed: int) -> None:
         total_time = time.time() - (self.start_time or time.time())
         global_step = int(carry.global_step)
         print(f"\n{'='*50}")
@@ -341,7 +345,7 @@ class CompiledTrainer:
 
     def _print_seeds_summary(
         self,
-        all_carries: CompiledSACCarry,
+        all_carries: Any,
         all_metrics: dict,
         num_seeds: int,
     ) -> None:

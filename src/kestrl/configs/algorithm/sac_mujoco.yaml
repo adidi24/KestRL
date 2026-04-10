@@ -1,4 +1,5 @@
 _target_: kestrl.algorithms.sac.SAC
+compiled_factory: kestrl.algorithms.sac.compiled.sac.make_compiled_sac
 name: sac
 
 # Network architecture — _partial_=True in _build_networks() injects obs_dim/action_dim/rngs

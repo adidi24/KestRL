@@ -1,4 +1,5 @@
 _target_: kestrl.algorithms.pbsac.PBSAC
+compiled_factory: kestrl.algorithms.pbsac.compiled.pbsac.make_compiled_pbsac
 name: pbsac
 
 # Network architecture
