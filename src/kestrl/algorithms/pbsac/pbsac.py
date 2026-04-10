@@ -149,15 +149,20 @@ class PBSAC(SAC):
         self._jit_soft_update = _make_frozen_soft_update(self._bundle_gd)
         
         # PB specific
-        self._jit_update_pb_posterior, self._jit_compute_bound = \
+        _update_posterior, _compute_bound = \
             _make_frozen_update_pb_posterior(self._bundle_gd, self.is_discrete, self.pb_policy_samples)
-        
-        self._jit_adaptive_update_critics = _make_frozen_adaptive_continuous_update(self._bundle_gd, self.action_scale, self.action_bias, self.adaptation_samples)
-        self._jit_get_action_sample, self._jit_get_action_det = \
-            _make_frozen_continuous_get_action_pb(self._bundle_gd, self.action_scale, self.action_bias, self.explore_n_samples)
-        self._jit_sync_posterior    = _make_frozen_sync_posterior(self._bundle_gd)
-        self._jit_inject_posterior  = _make_frozen_inject_posterior(self._bundle_gd)
-        self._jit_prior_ema_update  = _make_frozen_prior_ema_update(self._bundle_gd, self.pb_prior_decay)
+        self._jit_update_pb_posterior = jax.jit(_update_posterior)
+        self._jit_compute_bound       = jax.jit(_compute_bound)
+
+        self._jit_adaptive_update_critics = jax.jit(
+            _make_frozen_adaptive_continuous_update(self._bundle_gd, self.action_scale, self.action_bias, self.adaptation_samples)
+        )
+        _sample, _det = _make_frozen_continuous_get_action_pb(self._bundle_gd, self.action_scale, self.action_bias, self.explore_n_samples)
+        self._jit_get_action_sample = jax.jit(_sample)
+        self._jit_get_action_det    = jax.jit(_det)
+        self._jit_sync_posterior    = jax.jit(_make_frozen_sync_posterior(self._bundle_gd))
+        self._jit_inject_posterior  = jax.jit(_make_frozen_inject_posterior(self._bundle_gd))
+        self._jit_prior_ema_update  = jax.jit(_make_frozen_prior_ema_update(self._bundle_gd, self.pb_prior_decay))
 
         del (self.actor, self.actor_optimizer,
              self.critic1, self.critic1_optimizer,
@@ -196,15 +201,20 @@ class PBSAC(SAC):
         self._jit_soft_update = _make_frozen_soft_update(self._bundle_gd)
         
         # PB specific
-        self._jit_update_pb_posterior, self._jit_compute_bound = \
+        _update_posterior, _compute_bound = \
             _make_frozen_update_pb_posterior(self._bundle_gd, self.is_discrete, self.pb_policy_samples)
-        
-        self._jit_adaptive_update_critics = _make_frozen_adaptive_discrete_update(self._bundle_gd, self.adaptation_samples)
-        self._jit_get_action_sample, self._jit_get_action_det = \
-            _make_frozen_discrete_get_action_pb(self._bundle_gd, self.explore_n_samples)
-        self._jit_sync_posterior    = _make_frozen_sync_posterior(self._bundle_gd)
-        self._jit_inject_posterior  = _make_frozen_inject_posterior(self._bundle_gd)
-        self._jit_prior_ema_update  = _make_frozen_prior_ema_update(self._bundle_gd, self.pb_prior_decay)
+        self._jit_update_pb_posterior = jax.jit(_update_posterior)
+        self._jit_compute_bound       = jax.jit(_compute_bound)
+
+        self._jit_adaptive_update_critics = jax.jit(
+            _make_frozen_adaptive_discrete_update(self._bundle_gd, self.adaptation_samples)
+        )
+        _sample, _det = _make_frozen_discrete_get_action_pb(self._bundle_gd, self.explore_n_samples)
+        self._jit_get_action_sample = jax.jit(_sample)
+        self._jit_get_action_det    = jax.jit(_det)
+        self._jit_sync_posterior    = jax.jit(_make_frozen_sync_posterior(self._bundle_gd))
+        self._jit_inject_posterior  = jax.jit(_make_frozen_inject_posterior(self._bundle_gd))
+        self._jit_prior_ema_update  = jax.jit(_make_frozen_prior_ema_update(self._bundle_gd, self.pb_prior_decay))
 
         del (self.actor, self.actor_optimizer,
              self.critic1, self.critic1_optimizer,
@@ -467,7 +477,7 @@ class PBSAC(SAC):
           else:                                                                                                                                                      
               return self._jit_get_action_det(self._bundle_state, obs, self.action_scale, self.action_bias)
         
-        should_explore = bool(jax.random.uniform(decision_key) < self.explore_prob) and not deterministic
+        should_explore = jax.random.uniform(decision_key) < self.explore_prob
         return self._jit_get_action_sample(
             self._bundle_state, obs, should_explore, key
         )

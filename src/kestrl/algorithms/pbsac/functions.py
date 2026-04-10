@@ -22,6 +22,49 @@ from kestrl.distributions import (
     BlockPrior
 )
 
+def estimate_mixing_time(
+    rewards: jax.Array,
+    states: jax.Array,
+    masks: jax.Array,
+    c: float = 5.0,
+) -> jax.Array:
+    """Estimate Markov chain mixing time via the Sokal windowed IAT estimator.
+    """
+    T = rewards.shape[1]
+
+    def _iat(signal: jax.Array, m: jax.Array) -> jax.Array:
+        """Sokal windowed IAT for a single 1-D signal with boolean mask."""
+        m_f = m.astype(jnp.float32)
+        active_count = jnp.maximum(jnp.sum(m_f), 1.0)
+        mean = jnp.sum(signal * m_f) / active_count
+        r_c = (signal - mean) * m_f
+
+        fft_r = jnp.fft.rfft(r_c, n=2 * T)
+        acf = jnp.fft.irfft(fft_r * jnp.conj(fft_r), n=2 * T)[:T].real
+
+        zero_lag = acf[0]
+        acf_norm = acf / jnp.maximum(jnp.abs(zero_lag), 1e-8)
+
+        taus = 2.0 * jnp.cumsum(acf_norm) - 1.0
+
+        lags = jnp.arange(T, dtype=jnp.float32)
+        converged = lags >= c * taus
+        has_window = jnp.any(converged)
+        window_idx = jnp.argmax(converged)
+
+        tau_int = jnp.where(has_window, taus[window_idx], taus[-1])
+        return jnp.where(zero_lag < 1e-8, 1.0, jnp.maximum(1.0, tau_int))
+
+    def single_traj(r: jax.Array, s: jax.Array, m: jax.Array) -> jax.Array:
+        """Max IAT across rewards + all state feature dimensions for one trajectory."""
+        tau_r = _iat(r, m)
+        tau_s = jax.vmap(lambda feat: _iat(feat, m))(s.T)
+        return jnp.maximum(tau_r, jnp.max(tau_s))
+
+    taus = jax.vmap(single_traj)(rewards, states, masks)
+    return jnp.ceil(jnp.max(taus)).astype(jnp.int32)
+
+
 def compute_policy_is_return(
     actor: nnx.Module,
     is_discrete: bool,
@@ -77,12 +120,10 @@ def compute_pac_bayes_loss(
 ) -> tuple[jnp.ndarray, dict]:
     """Computes the PAC-Bayes loss."""
     
-    estimated_returns = []
-    current_key = key
-    
+    keys = jax.random.split(key, num_samples)
     graphdef, _ = nnx.split(actor)
-    for _ in range(num_samples):
-        current_key, sub_key = jax.random.split(current_key)
+    
+    def compute_single_sample_return(sub_key):
         sampled_flat_state = block_sample(posterior, sub_key)
         
         sampled_actor_state = _construct_state_from_flat_state(sampled_flat_state, posterior.shapes)
@@ -91,9 +132,9 @@ def compute_pac_bayes_loss(
         ret = compute_policy_is_return(
             temp_actor, is_discrete, batch_data
         )
-        estimated_returns.append(ret)
-
-    estimated_returns = jnp.stack(estimated_returns)
+        return ret
+    
+    estimated_returns = jax.vmap(compute_single_sample_return)(keys)
     mean_return = jnp.mean(estimated_returns)
 
     kl   = kl_block(posterior, prior)
@@ -126,23 +167,21 @@ def compute_pac_bayes_bound(
 ) -> dict:
     """Computes the PAC-Bayes bound on test trajectories."""
     
-    estimated_returns = []
-    current_key = key
-    
+    keys = jax.random.split(key, num_samples)
     graphdef, _ = nnx.split(actor)
-    for _ in range(num_samples):
-        current_key, sub_key = jax.random.split(current_key)
-        flat_state = block_sample(posterior, sub_key)
+    
+    def compute_single_sample_return(sub_key):
+        sampled_flat_state = block_sample(posterior, sub_key)
         
-        actor_state = _construct_state_from_flat_state(flat_state, posterior.shapes)
+        actor_state = _construct_state_from_flat_state(sampled_flat_state, posterior.shapes)
         temp_actor = nnx.merge(graphdef, actor_state)
         
         ret = compute_policy_is_return(
             temp_actor, is_discrete, batch_data
         )
-        estimated_returns.append(ret)
+        return ret
 
-    estimated_returns = jnp.stack(estimated_returns)
+    estimated_returns = jax.vmap(compute_single_sample_return)(keys)
     mean_return = jnp.mean(estimated_returns)
 
     kl = kl_block(posterior, prior)
@@ -174,12 +213,12 @@ def get_actor_discrete_action_from_posterior_vmap(
     critic1: nnx.Module,
     critic2: nnx.Module,
     obs: jax.Array,
-    should_explore: bool,
+    should_explore: jax.Array,
     explore_n_samples: int,
     key: jax.Array,
 ) -> tuple[jax.Array, dict]:
     
-    if should_explore:
+    def pge_fn(key):
         graphdef, _ = nnx.split(actor)
         
         def sample_and_apply(key):
@@ -202,12 +241,15 @@ def get_actor_discrete_action_from_posterior_vmap(
         action = results['action'][best_idx, jnp.arange(best_idx.shape[0])]
         log_prob = results['log_prob'][best_idx, jnp.arange(best_idx.shape[0])]
         aux = results['aux'][best_idx, jnp.arange(best_idx.shape[0])]
-    else:
+        return action, log_prob, aux
+    
+    def sac_fn(key):
         action, log_prob, aux = get_discrete_actor_action(
             actor, obs, key
         )
-
-    return action, log_prob, aux
+        return action, log_prob, aux
+    
+    return jax.lax.cond(should_explore, pge_fn, sac_fn, key)
 
 def get_actor_continuous_action_from_posterior_vmap(
     posterior: BlockPosterior,
@@ -217,12 +259,12 @@ def get_actor_continuous_action_from_posterior_vmap(
     obs: jax.Array,
     action_scale: jax.Array,
     action_bias: jax.Array,
-    should_explore: bool,
+    should_explore: jax.Array,
     explore_n_samples: int,
     key: jax.Array,
 ) -> tuple[jax.Array, dict]:
     
-    if should_explore:
+    def pge_fn(key):
         graphdef, _ = nnx.split(actor)
         
         def sample_and_apply(key):
@@ -248,9 +290,12 @@ def get_actor_continuous_action_from_posterior_vmap(
         action = results['action'][best_idx, jnp.arange(best_idx.shape[0])]
         log_prob = results['log_prob'][best_idx, jnp.arange(best_idx.shape[0])]
         aux = results['aux'][best_idx, jnp.arange(best_idx.shape[0])]
-    else:
+        return action, log_prob, aux
+    
+    def sac_fn(key):
         action, log_prob, aux = get_continuous_actor_action(
             actor, obs, action_scale, action_bias, key
         )
-
-    return action, log_prob, aux
+        return action, log_prob, aux
+    
+    return jax.lax.cond(should_explore, pge_fn, sac_fn, key)

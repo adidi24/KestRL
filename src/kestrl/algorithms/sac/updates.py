@@ -1,8 +1,8 @@
 """Frozen pytree-first SAC update functions.
 
-graphdef is captured in Python closure at init; only state pytrees flow through
-@jax.jit. nnx.merge/split inside JIT are trace-time ops, no Python overhead
-per call vs @nnx.jit which re-traverses the object graph every call.
+graphdef is captured in Python closure at init; only state pytrees cross the
+JIT boundary. Factories return plain callables — callers apply jax.jit so the
+same function can be used unjitted inside lax.scan bodies.
 """
 
 import jax
@@ -25,7 +25,6 @@ from kestrl.algorithms.sac.functions import (
 def _make_frozen_continuous_update(bundle_gd, autotune_alpha: bool):
     """Return (update_critics_fn, update_actor_alpha_fn)."""
 
-    @jax.jit
     def _update_critics(
         bundle_state,
         obs, actions, rewards, next_obs, dones,
@@ -54,7 +53,6 @@ def _make_frozen_continuous_update(bundle_gd, autotune_alpha: bool):
         _, new_state = nnx.split(b)
         return new_state, {'critic/loss': q1_loss + q2_loss}
 
-    @jax.jit
     def _update_actor_alpha(
         bundle_state,
         obs, action_scale, action_bias, target_entropy, key,
@@ -86,7 +84,6 @@ def _make_frozen_continuous_update(bundle_gd, autotune_alpha: bool):
 
 
 def _make_frozen_soft_update(bundle_gd):
-    @jax.jit
     def _soft_update(bundle_state, tau):
         b = nnx.merge(bundle_gd, bundle_state)
         c1_state = nnx.state(b.critic1)
@@ -106,7 +103,6 @@ def _make_frozen_discrete_update(bundle_gd, autotune_alpha: bool):
     """Discrete SAC update. No sampling needed — all expectations are over the
     full action distribution via softmax/log_softmax."""
 
-    @jax.jit
     def _update(
         bundle_state,
         obs, actions, rewards, next_obs, dones,
@@ -161,12 +157,10 @@ def _make_frozen_discrete_update(bundle_gd, autotune_alpha: bool):
     return _update
 
 def _make_frozen_continuous_get_action(bundle_gd):
-    @jax.jit
     def _sample(bundle_state, obs, action_scale, action_bias, key):
         b = nnx.merge(bundle_gd, bundle_state)
         return get_continuous_actor_action(b.actor, obs, action_scale, action_bias, key)
 
-    @jax.jit
     def _deterministic(bundle_state, obs, action_scale, action_bias):
         b = nnx.merge(bundle_gd, bundle_state)
         logits = b.actor(obs)
@@ -175,12 +169,10 @@ def _make_frozen_continuous_get_action(bundle_gd):
     return _sample, _deterministic
 
 def _make_frozen_discrete_get_action(bundle_gd):
-    @jax.jit
     def _sample(bundle_state, obs, key):
         b = nnx.merge(bundle_gd, bundle_state)
         return get_discrete_actor_action(b.actor, obs, key)
 
-    @jax.jit
     def _deterministic(bundle_state, obs):
         b = nnx.merge(bundle_gd, bundle_state)
         return jnp.argmax(b.actor(obs), axis=-1), None, None

@@ -199,11 +199,14 @@ class SAC(BaseAlgorithm):
 
         self._bundle_gd, self._bundle_state = nnx.split(bundle)
 
-        self._jit_update_critics, self._jit_update_actor_alpha = \
+        _update_critics, _update_actor_alpha = \
             _make_frozen_continuous_update(self._bundle_gd, self.autotune_alpha)
-        self._jit_soft_update = _make_frozen_soft_update(self._bundle_gd)
-        self._jit_get_action_sample, self._jit_get_action_det = \
-            _make_frozen_continuous_get_action(self._bundle_gd)
+        self._jit_update_critics     = jax.jit(_update_critics)
+        self._jit_update_actor_alpha = jax.jit(_update_actor_alpha)
+        self._jit_soft_update = jax.jit(_make_frozen_soft_update(self._bundle_gd))
+        _sample, _det = _make_frozen_continuous_get_action(self._bundle_gd)
+        self._jit_get_action_sample = jax.jit(_sample)
+        self._jit_get_action_det    = jax.jit(_det)
 
         del (self.actor, self.actor_optimizer,
              self.critic1, self.critic1_optimizer,
@@ -229,11 +232,12 @@ class SAC(BaseAlgorithm):
 
         self._bundle_gd, self._bundle_state = nnx.split(bundle)
 
-        self._jit_update      = _make_frozen_discrete_update(
-            self._bundle_gd, self.autotune_alpha)
-        self._jit_soft_update = _make_frozen_soft_update(self._bundle_gd)
-        self._jit_get_action_sample, self._jit_get_action_det = \
-            _make_frozen_discrete_get_action(self._bundle_gd)
+        self._jit_update      = jax.jit(_make_frozen_discrete_update(
+            self._bundle_gd, self.autotune_alpha))
+        self._jit_soft_update = jax.jit(_make_frozen_soft_update(self._bundle_gd))
+        _sample, _det = _make_frozen_discrete_get_action(self._bundle_gd)
+        self._jit_get_action_sample = jax.jit(_sample)
+        self._jit_get_action_det    = jax.jit(_det)
 
         del (self.actor, self.actor_optimizer,
              self.critic1, self.critic1_optimizer,

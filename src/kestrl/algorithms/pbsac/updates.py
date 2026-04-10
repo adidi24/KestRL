@@ -1,8 +1,8 @@
 """Frozen pytree update functions for PB-SAC.
 
-graphdef is captured in Python closure at init; only state pytrees flow through
-@jax.jit. Mirrors the pattern in sac/updates.py, extended with posterior
-sampling via vmap for the actor-frozen adaptation phase.
+graphdef is captured in Python closure at init; only state pytrees cross the
+JIT boundary. Factories return plain callables — callers apply jax.jit so the
+same function can be used unjitted inside lax.scan bodies.
 """
 
 import jax
@@ -29,7 +29,6 @@ from kestrl.distributions import (
 
 def _make_frozen_update_pb_posterior(bundle_gd, is_discrete: bool, num_samples: int):
     
-    @jax.jit
     def _update(
         bundle_state,
         C_const, C_prime_const,
@@ -52,7 +51,6 @@ def _make_frozen_update_pb_posterior(bundle_gd, is_discrete: bool, num_samples: 
         _, new_state = nnx.split(b)
         return new_state, metrics
     
-    @jax.jit
     def _compute_bound(
         bundle_state,
         T: int,
@@ -90,7 +88,6 @@ def _make_frozen_adaptive_discrete_update(bundle_gd, adaptation_samples: int = 2
     static int — not a traced value.
     """
 
-    @jax.jit
     def _update(
         bundle_state,
         obs, actions, rewards, next_obs, dones,
@@ -144,7 +141,6 @@ def _make_frozen_adaptive_continuous_update(bundle_gd, action_scale, action_bias
     because their input (next_action) depends on the sampled actor weights.
     """
 
-    @jax.jit
     def _update(
         bundle_state,
         obs, actions, rewards, next_obs, dones,
@@ -196,7 +192,6 @@ def _make_frozen_adaptive_continuous_update(bundle_gd, action_scale, action_bias
 def _make_frozen_sync_posterior(bundle_gd):
     """Copy current actor params → posterior layer means after each SAC update."""
 
-    @jax.jit
     def _sync(bundle_state):
         b = nnx.merge(bundle_gd, bundle_state)
         params_tree = nnx.state(b.actor, nnx.Param)
@@ -211,7 +206,6 @@ def _make_frozen_sync_posterior(bundle_gd):
 def _make_frozen_inject_posterior(bundle_gd):
     """Overwrite actor params with posterior mean (no noise) after PAC-Bayes update."""
 
-    @jax.jit
     def _inject(bundle_state):
         b = nnx.merge(bundle_gd, bundle_state)
         flat_state = {name: lp.mean.get_value() for name, lp in b.posterior.layers.items()}
@@ -226,7 +220,6 @@ def _make_frozen_inject_posterior(bundle_gd):
 def _make_frozen_prior_ema_update(bundle_gd, decay: float):
     """Slide prior toward posterior: μ₀ ← decay·μ_q + (1-decay)·μ₀."""
 
-    @jax.jit
     def _ema_update(bundle_state):
         b = nnx.merge(bundle_gd, bundle_state)
         ema_update_prior(b.prior, b.posterior, decay)
@@ -238,13 +231,11 @@ def _make_frozen_prior_ema_update(bundle_gd, decay: float):
 
 def _make_frozen_discrete_get_action_pb(bundle_gd, explore_n_samples: int):
     
-    @jax.jit(static_argnames=('should_explore',))
     def _sample(bundle_state, obs, should_explore, key):
         b = nnx.merge(bundle_gd, bundle_state)
         return get_actor_discrete_action_from_posterior_vmap(b.posterior, b.actor, b.critic1, b.critic2,
                                                              obs, should_explore, explore_n_samples, key)
 
-    @jax.jit
     def _deterministic(bundle_state, obs):
         b = nnx.merge(bundle_gd, bundle_state)
         return jnp.argmax(b.actor(obs), axis=-1), None, None
@@ -253,13 +244,11 @@ def _make_frozen_discrete_get_action_pb(bundle_gd, explore_n_samples: int):
 
 def _make_frozen_continuous_get_action_pb(bundle_gd, action_scale, action_bias, explore_n_samples: int):
     
-    @jax.jit(static_argnames=('should_explore',))
     def _sample(bundle_state, obs, should_explore, key):
         b = nnx.merge(bundle_gd, bundle_state)
         return get_actor_continuous_action_from_posterior_vmap(b.posterior, b.actor, b.critic1, b.critic2,
                                                                obs, action_scale, action_bias, should_explore, explore_n_samples, key)
 
-    @jax.jit
     def _deterministic(bundle_state, obs, action_scale, action_bias):
         b = nnx.merge(bundle_gd, bundle_state)
         logits = b.actor(obs)
