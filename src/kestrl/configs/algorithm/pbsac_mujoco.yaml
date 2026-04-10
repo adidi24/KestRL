@@ -40,7 +40,7 @@ pb_update_freq: 20000 # Update frequency of PAC-Bayes components
 delta: 0.05 # failure probability in PAC-Bayes bound
 r_max_estimate: 10.0 # Conservative estimate
 mixing_time: 200 # Conservative estimate
-pb_rollout_trajectories: 20
+pb_rollout_trajectories: 50
 pb_rollout_steps: 1000
 pb_policy_samples: 16 # Samples for estimation
 pb_update_epochs: 100 # Optimization epochs

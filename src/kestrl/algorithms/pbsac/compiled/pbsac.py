@@ -292,11 +292,16 @@ def make_compiled_pbsac(env: BraxVectorEnv, config: dict) -> CompiledPBSACFuncti
         next_ep     = jnp.where(any_done, jnp.zeros_like(new_ep), new_ep)
         new_r_max   = jnp.maximum(carry.r_max, jnp.max(jnp.abs(trajectory.rewards)))
 
-        # 4. SAC gradient update — actor_frozen selects adaptive (critics only) vs full update
+        # 4. SAC gradient update — actor_frozen selects adaptive (critics only) vs full update.
+        #    adaptive_grad_fn only returns {'critic/loss'}; pad with zeros so both branches
+        #    of lax.cond have identical pytree structure.
         def do_sac_update(bs):
+            def frozen_update(b):
+                new_b, m = adaptive_grad_fn(b, new_buf, k_grad, upper)
+                return new_b, {**_empty_sac_metrics, **m}
             return jax.lax.cond(
                 carry.actor_frozen,
-                lambda b: adaptive_grad_fn(b, new_buf, k_grad, upper),
+                frozen_update,
                 lambda b: grad_fn(b, new_buf, k_grad, upper),
                 bs,
             )
