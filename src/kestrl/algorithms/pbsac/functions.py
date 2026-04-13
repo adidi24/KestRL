@@ -22,6 +22,18 @@ from kestrl.distributions import (
     BlockPrior
 )
 
+
+def _get_actor_base_state(actor: nnx.Module) -> dict:
+    """Extract a flat {path: array} dict of the actor's current params.
+
+    Used as ``base_state`` for ``_construct_state_from_flat_state`` when the
+    posterior only covers a subset of layers (``fixed_layers_depth > 0``).
+    """
+    return {
+        path: param.get_value()
+        for path, param in nnx.to_flat_state(nnx.state(actor, nnx.Param))
+    }
+
 def estimate_mixing_time(
     rewards: jax.Array,
     states: jax.Array,
@@ -122,11 +134,14 @@ def compute_pac_bayes_loss(
     
     keys = jax.random.split(key, num_samples)
     graphdef, _ = nnx.split(actor)
+    base_state = _get_actor_base_state(actor)
     
     def compute_single_sample_return(sub_key):
         sampled_flat_state = block_sample(posterior, sub_key)
         
-        sampled_actor_state = _construct_state_from_flat_state(sampled_flat_state, posterior.shapes)
+        sampled_actor_state = _construct_state_from_flat_state(
+            sampled_flat_state, posterior.shapes, base_state=base_state,
+        )
         temp_actor = nnx.merge(graphdef, sampled_actor_state)
         
         ret = compute_policy_is_return(
@@ -169,11 +184,14 @@ def compute_pac_bayes_bound(
     
     keys = jax.random.split(key, num_samples)
     graphdef, _ = nnx.split(actor)
+    base_state = _get_actor_base_state(actor)
     
     def compute_single_sample_return(sub_key):
         sampled_flat_state = block_sample(posterior, sub_key)
         
-        actor_state = _construct_state_from_flat_state(sampled_flat_state, posterior.shapes)
+        actor_state = _construct_state_from_flat_state(
+            sampled_flat_state, posterior.shapes, base_state=base_state,
+        )
         temp_actor = nnx.merge(graphdef, actor_state)
         
         ret = compute_policy_is_return(
@@ -220,11 +238,14 @@ def get_actor_discrete_action_from_posterior_vmap(
     
     def pge_fn(key):
         graphdef, _ = nnx.split(actor)
+        base_state = _get_actor_base_state(actor)
         
         def sample_and_apply(key):
             sub_key1, sub_key2 = jax.random.split(key)
             flat_state = block_sample(posterior, sub_key1)
-            actor_state = _construct_state_from_flat_state(flat_state, posterior.shapes)
+            actor_state = _construct_state_from_flat_state(
+                flat_state, posterior.shapes, base_state=base_state,
+            )
             temp_actor = nnx.merge(graphdef, actor_state)
 
             action, log_prob, action_probs = get_discrete_actor_action(temp_actor, obs, sub_key2)
@@ -266,11 +287,14 @@ def get_actor_continuous_action_from_posterior_vmap(
     
     def pge_fn(key):
         graphdef, _ = nnx.split(actor)
+        base_state = _get_actor_base_state(actor)
         
         def sample_and_apply(key):
             sub_key1, sub_key2 = jax.random.split(key)
             flat_state = block_sample(posterior, sub_key1)
-            actor_state = _construct_state_from_flat_state(flat_state, posterior.shapes)
+            actor_state = _construct_state_from_flat_state(
+                flat_state, posterior.shapes, base_state=base_state,
+            )
             temp_actor = nnx.merge(graphdef, actor_state)
 
             action, log_prob, mean = get_continuous_actor_action(

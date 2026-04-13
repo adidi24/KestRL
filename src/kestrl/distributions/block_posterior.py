@@ -37,17 +37,46 @@ class BlockPosterior(nnx.Module):
         self.shapes = shapes
 
     @staticmethod
-    def from_actor(actor: nnx.Module, rank: int = 10, init_std: float = 0.01) -> 'BlockPosterior':
+    def from_actor(
+        actor: nnx.Module,
+        rank: int = 10,
+        init_std: float = 0.01,
+        fixed_layers_depth: int = 0,
+    ) -> 'BlockPosterior':
         """Build a BlockPosterior from a Flax NNX actor.
 
         mean  = current actor weights (flattened per tensor)
         std   = init_std (uniform; Xavier-aware init is a future option)
         P     = zeros → at init the posterior is purely diagonal (KL = 0)
+
+        Args:
+            actor: Flax NNX actor module.
+            rank: Low-rank dimension for covariance factorisation.
+            init_std: Initial posterior standard deviation.
+            fixed_layers_depth: Number of leading modules to keep deterministic.
+                When > 0, the first N unique parameter modules identified during
+                state flattening are excluded from the posterior.
         """
         params_tree = nnx.state(actor, nnx.Param)
+        flat_state = list(nnx.to_flat_state(params_tree))
+        
+        # Discover unique layer modules in the order they appear
+        # in the model state (top-to-bottom for standard models)
+        unique_modules = []
+        for path, _ in flat_state:
+            mod_path = path[:-1]
+            if mod_path not in unique_modules:
+                unique_modules.append(mod_path)
+        
+        frozen_modules = set(unique_modules[:fixed_layers_depth])
+
         layers = {}
         shapes = {}
-        for path, param in nnx.to_flat_state(params_tree):
+        for path, param in flat_state:
+            # Optionally skip leading layers based on depth
+            if fixed_layers_depth > 0 and path[:-1] in frozen_modules:
+                continue
+
             mean = param.get_value().flatten()
             std  = jnp.full_like(mean, init_std)
             P    = jnp.zeros((mean.shape[0], rank))
@@ -105,9 +134,39 @@ def ema_update_prior(prior: BlockPrior, posterior: BlockPosterior, decay: float 
         }
         return prior
 
-def _construct_state_from_flat_state(sampled_flat_state: dict, shapes: dict) -> dict:
-    """Temporarily injects sampled parameters into the actor network."""
-    new_flat = {path: sampled_flat_state[path].reshape(shapes[path]) for path in sampled_flat_state}
+def _construct_state_from_flat_state(
+    sampled_flat_state: dict,
+    shapes: dict,
+    base_state: dict | None = None,
+) -> dict:
+    """Build an actor state by overlaying sampled params onto a base state.
+
+    When the posterior only covers a subset of actor layers (via
+    ``fixed_layers_depth``), ``base_state`` must be supplied.  It provides
+    the full set of actor parameters — the sampled posterior values are
+    then written on top of the matching paths while backbone layers keep
+    their deterministic values.
+
+    Args:
+        sampled_flat_state: ``{path: flat_array}`` from ``block_sample``.
+        shapes: ``{path: shape}`` from ``posterior.shapes``.
+        base_state: If not ``None``, a flat ``{path: array}`` dict of the
+            current actor params (all layers).  Paths present in
+            ``sampled_flat_state`` are overwritten; the rest pass through.
+
+    Returns:
+        A nested ``nnx.State`` ready for ``nnx.merge(actor_gd, state)``.
+    """
+    if base_state is not None:
+        # Start from the full actor state and overwrite posterior layers
+        new_flat = {path: val for path, val in base_state.items()}
+        for path in sampled_flat_state:
+            new_flat[path] = sampled_flat_state[path].reshape(shapes[path])
+    else:
+        new_flat = {
+            path: sampled_flat_state[path].reshape(shapes[path])
+            for path in sampled_flat_state
+        }
     state = nnx.from_flat_state(new_flat)
     return state
         

@@ -19,6 +19,7 @@ from kestrl.algorithms.pbsac.functions import (
     compute_pac_bayes_bound,
     get_actor_discrete_action_from_posterior_vmap,
     get_actor_continuous_action_from_posterior_vmap,
+    _get_actor_base_state,
 )
 from kestrl.distributions import (
     _construct_state_from_flat_state,
@@ -97,12 +98,15 @@ def _make_frozen_adaptive_discrete_update(bundle_gd, adaptation_samples: int = 2
         alpha = jnp.exp(b.log_alpha.value[...])
         # Graphdef extracted once outside vmap; only key is mapped, not the module structure
         actor_gd, _ = nnx.split(b.actor)
+        base_state = _get_actor_base_state(b.actor)
 
         # Sample actor weights from posterior → action distribution → soft next-Q
         def sample_and_apply(key):
             sub_key1, sub_key2 = jax.random.split(key)
             flat_state = block_sample(b.posterior, sub_key1)
-            sampled_actor_state = _construct_state_from_flat_state(flat_state, b.posterior.shapes)
+            sampled_actor_state = _construct_state_from_flat_state(
+                flat_state, b.posterior.shapes, base_state=base_state,
+            )
             temp_actor = nnx.merge(actor_gd, sampled_actor_state)
             _, next_log_pi, next_action_probs = get_discrete_actor_action(temp_actor, next_obs, sub_key2)
             min_next_q = jnp.minimum(
@@ -149,12 +153,15 @@ def _make_frozen_adaptive_continuous_update(bundle_gd, action_scale, action_bias
         b = nnx.merge(bundle_gd, bundle_state)
         alpha = jnp.exp(b.log_alpha.value[...])
         actor_gd, _ = nnx.split(b.actor)
+        base_state = _get_actor_base_state(b.actor)
 
         # Sample actor weights from posterior → sampled next_action → soft next-Q
         def sample_and_apply(key):
             sub_key1, sub_key2 = jax.random.split(key)
             flat_state = block_sample(b.posterior, sub_key1)
-            sampled_actor_state = _construct_state_from_flat_state(flat_state, b.posterior.shapes)
+            sampled_actor_state = _construct_state_from_flat_state(
+                flat_state, b.posterior.shapes, base_state=base_state,
+            )
             temp_actor = nnx.merge(actor_gd, sampled_actor_state)
             next_action, next_log_pi, _ = get_continuous_actor_action(
                 temp_actor, next_obs, action_scale, action_bias, sub_key2
@@ -190,13 +197,18 @@ def _make_frozen_adaptive_continuous_update(bundle_gd, action_scale, action_bias
     return _update
 
 def _make_frozen_sync_posterior(bundle_gd):
-    """Copy current actor params → posterior layer means after each SAC update."""
+    """Copy current actor params → posterior layer means after each SAC update.
+
+    Only syncs layers that exist in the posterior — backbone layers excluded
+    by fixed_layers_depth are silently skipped.
+    """
 
     def _sync(bundle_state):
         b = nnx.merge(bundle_gd, bundle_state)
         params_tree = nnx.state(b.actor, nnx.Param)
         for path, param in nnx.to_flat_state(params_tree):
-            b.posterior.layers[path].mean.set_value(param.get_value().flatten())
+            if path in b.posterior.layers:
+                b.posterior.layers[path].mean.set_value(param.get_value().flatten())
         _, new_state = nnx.split(b)
         return new_state
 
@@ -204,13 +216,18 @@ def _make_frozen_sync_posterior(bundle_gd):
 
 
 def _make_frozen_inject_posterior(bundle_gd):
-    """Overwrite actor params with posterior mean (no noise) after PAC-Bayes update."""
+    """Overwrite actor params with posterior mean (no noise) after PAC-Bayes update.
+
+    Only injects into layers that exist in the posterior — backbone layers
+    excluded by fixed_layers_depth keep their current (SAC-trained) values.
+    """
 
     def _inject(bundle_state):
         b = nnx.merge(bundle_gd, bundle_state)
-        flat_state = {name: lp.mean.get_value() for name, lp in b.posterior.layers.items()}
-        actor_state = _construct_state_from_flat_state(flat_state, b.posterior.shapes)
-        nnx.update(b.actor, actor_state)
+        for path, param in nnx.to_flat_state(nnx.state(b.actor, nnx.Param)):
+            if path in b.posterior.layers:
+                new_val = b.posterior.layers[path].mean.get_value()
+                param.set_value(new_val.reshape(b.posterior.shapes[path]))
         _, new_state = nnx.split(b)
         return new_state
 

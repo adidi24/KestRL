@@ -49,6 +49,7 @@ pb_prior_decay: 0.99 # Decay factor for prior
 pb_init_std: 0.01 # Initial std for posterior
 pb_posterior_lr: 1e-3 # Learning rate for posterior optimization
 pb_rank: 15 # Low-rank dimension for covariance
+fixed_layers_depth: 0 # 0=all layers stochastic, 2=only output heads (reduces KL)
 
 # Actor freezing for stability after PAC-Bayes updates
 actor_freeze_steps: 20 # Steps to freeze actor after PB update

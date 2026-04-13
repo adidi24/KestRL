@@ -30,6 +30,8 @@ def _make_jax_scan_pge_rollout(
     explore_n_samples: int,
 ):
     """Return a scan-based rollout function for a Brax/MJX environment.
+    This function is used for PB-SAC and it allows to collect rollouts using
+    Posterior Guided Exploration (See Section 4.2 in the paper: https://arxiv.org/abs/2510.10544).
 
     Args:
         bundle_gd    : SAC bundle graphdef, captured in closure. Never re-traced.
@@ -45,12 +47,22 @@ def _make_jax_scan_pge_rollout(
     """
     if is_discrete:
         def _act(bundle_state, obs, should_explore, key):
-            action, _, _ = get_actor_discrete_action_from_posterior_vmap(bundle_state.posterior, bundle_state.actor, bundle_state.critic1, bundle_state.critic2,
-                                                                obs, should_explore, explore_n_samples, key)
+            if explore_n_samples == 1:
+                action, _, _ = get_discrete_actor_action(bundle_state.actor, obs, key)
+                return action
+            action, _, _ = get_actor_discrete_action_from_posterior_vmap(
+                bundle_state.posterior, bundle_state.actor, bundle_state.critic1, bundle_state.critic2,
+                obs, should_explore, explore_n_samples, key
+            )
             return action
     else:
         assert action_scale is not None and action_bias is not None, "action_scale and action_bias must be provided for continuous environments"
         def _act(bundle_state, obs, should_explore, key):
+            if explore_n_samples == 1:
+                action, _, _ = get_continuous_actor_action(
+                    bundle_state.actor, obs, action_scale, action_bias, key
+                )
+                return action
             action, _, _ = get_actor_continuous_action_from_posterior_vmap(
                 bundle_state.posterior, bundle_state.actor, bundle_state.critic1, bundle_state.critic2,
                 obs, action_scale, action_bias, should_explore, explore_n_samples, key

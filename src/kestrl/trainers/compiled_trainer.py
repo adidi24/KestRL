@@ -135,7 +135,7 @@ class CompiledTrainer:
         print(f"  Compiling first epoch…")
 
         all_carries  = jax.jit(jax.vmap(self._fns.init))(keys)
-        vmapped_step = jax.jit(jax.vmap(self._fns.step_epoch))
+        vmapped_step = self._fns.vmap_step_epoch
 
         collected: list[dict] = []   # per epoch: {k: ndarray (num_seeds, log_interval)}
         last_critic_loss = 0.0

@@ -53,10 +53,6 @@ _BASE_CFG = dict(
     mixing_time                = 1,
     actor_freeze_steps         = 2,
     adaptation_samples         = 4,
-    explore_prob_init          = 0.5,
-    explore_prob_final         = 0.0,
-    explore_prob_decay_duration= 0.5,
-    explore_n_samples          = 2,
 )
 
 
@@ -90,7 +86,6 @@ def test_init_carry_shapes(init_carry):
     assert init_carry.r_max == 0.0
     assert init_carry.actor_frozen == False
     assert init_carry.pb_loss == 0.0
-    assert init_carry.explore_prob.shape == ()
 
 
 # ── step_epoch ────────────────────────────────────────────────────────────────

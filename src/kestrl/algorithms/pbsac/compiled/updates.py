@@ -10,6 +10,7 @@ from kestrl.algorithms.sac.functions import (
 )
 from kestrl.algorithms.pbsac.functions import (
     compute_pac_bayes_loss,
+    _get_actor_base_state,
 )
 from kestrl.algorithms.pbsac.updates import (
     _make_frozen_inject_posterior,
@@ -118,12 +119,15 @@ def _make_adaptive_gradient_scan_continuous(
 
             b = nnx.merge(bundle_gd, carry_state)
             actor_gd, _ = nnx.split(b.actor)
+            base_state = _get_actor_base_state(b.actor)
             alpha = jnp.exp(b.log_alpha.value[...])
 
             def sample_and_apply(sample_key):
                 sub_key1, sub_key2 = jax.random.split(sample_key)
                 flat_state = block_sample(b.posterior, sub_key1)
-                sampled_actor_state = _construct_state_from_flat_state(flat_state, b.posterior.shapes)
+                sampled_actor_state = _construct_state_from_flat_state(
+                    flat_state, b.posterior.shapes, base_state=base_state,
+                )
                 temp_actor = nnx.merge(actor_gd, sampled_actor_state)
                 next_action, next_log_pi, _ = get_continuous_actor_action(
                     temp_actor, next_obs, action_scale, action_bias, sub_key2
@@ -197,6 +201,7 @@ def _make_adaptive_gradient_scan_discrete(
 
             b = nnx.merge(bundle_gd, carry_state)
             actor_gd, _ = nnx.split(b.actor)
+            base_state = _get_actor_base_state(b.actor)
             alpha = jnp.exp(b.log_alpha.value[...])
             
             # ── Critics ───────────────────────────────────────
@@ -204,7 +209,9 @@ def _make_adaptive_gradient_scan_discrete(
             def sample_and_apply(sample_key):
                 sub_key1, sub_key2 = jax.random.split(sample_key)
                 flat_state = block_sample(b.posterior, sub_key1)
-                sampled_actor_state = _construct_state_from_flat_state(flat_state, b.posterior.shapes)
+                sampled_actor_state = _construct_state_from_flat_state(
+                    flat_state, b.posterior.shapes, base_state=base_state,
+                )
                 temp_actor = nnx.merge(actor_gd, sampled_actor_state)
                 _, next_log_pi, next_action_probs = get_discrete_actor_action(temp_actor, next_obs, sub_key2)
                 min_next_q = jnp.minimum(

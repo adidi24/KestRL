@@ -103,6 +103,7 @@ def main(cfg: DictConfig) -> None:
         algo_cfg['log_interval']  = cfg.experiment.get('log_interval', 50)
         algo_cfg['eval_interval'] = cfg.experiment.get('eval_interval', None)
         algo_cfg['eval_episodes'] = cfg.experiment.get('eval_episodes', 100)
+        algo_cfg['env_id']        = cfg.environment.env_id
 
         trainer = CompiledTrainer(
             env,

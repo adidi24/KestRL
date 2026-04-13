@@ -46,19 +46,22 @@ class CompiledSACCarry(NamedTuple):
 class CompiledSACFunctions(NamedTuple):
     """All callables returned by make_compiled_sac.
 
-    train      : train(key) → (CompiledSACCarry, all_metrics)
-                 Full training in one lax.scan. Compose with jax.vmap for seeds.
-    init       : init(key) → CompiledSACCarry
-                 Initialise carry only — used by CompiledTrainer's epoch loop.
-    step_epoch : step_epoch(carry) → (CompiledSACCarry, epoch_metrics)
-                 Run log_interval train steps. JIT'd. Used for live logging.
-    evaluate   : evaluate(bundle_state, eval_env, num_episodes, seed) → dict
+    train            : train(key) → (CompiledSACCarry, all_metrics)
+                       Full training in one lax.scan. Compose with jax.vmap for seeds.
+    init             : init(key) → CompiledSACCarry
+                       Initialise carry only — used by CompiledTrainer's epoch loop.
+    step_epoch       : step_epoch(carry) → (CompiledSACCarry, epoch_metrics)
+                       Run log_interval train steps. JIT'd. Used for single-seed live logging.
+    vmap_step_epoch  : vmap_step_epoch(all_carries) → (all_carries, epoch_metrics)
+                       Multi-seed epoch. JIT'd + vmap'd. Used by train_seeds_live.
+    evaluate         : evaluate(bundle_state, eval_env, num_episodes, seed) → dict
                  Numpy eval path — works on any carry.bundle_state after training.
     """
-    train:      Callable
-    init:       Callable
-    step_epoch: Callable
-    evaluate:   Callable
+    train:            Callable
+    init:             Callable
+    step_epoch:       Callable
+    vmap_step_epoch:  Callable
+    evaluate:         Callable
 
 # ── Bundle factory ────────────────────────────────────────────────────────────
 
@@ -381,9 +384,12 @@ def make_compiled_sac(env: BraxVectorEnv, config: dict) -> CompiledSACFunctions:
             'num_episodes':  len(returns),
         }
 
+    vmap_step_epoch = jax.jit(jax.vmap(step_epoch))
+
     return CompiledSACFunctions(
-        train      = train,
-        init       = init,
-        step_epoch = step_epoch,
-        evaluate   = evaluate,
+        train           = train,
+        init            = init,
+        step_epoch      = step_epoch,
+        vmap_step_epoch = vmap_step_epoch,
+        evaluate        = evaluate,
     )

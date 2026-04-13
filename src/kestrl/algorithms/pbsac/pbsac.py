@@ -86,6 +86,7 @@ class PBSAC(SAC):
         self.explore_n_samples       = algo_cfg.get('explore_n_samples', 8)
         self.r_max       = algo_cfg.get('r_max_estimate', 1.0)
         self.mixing_time = algo_cfg.get('mixing_time', 1)
+        self.fixed_layers_depth = algo_cfg.get('fixed_layers_depth', 0)
 
         super().__init__(env, algo_cfg, seed=seed)
 
@@ -134,7 +135,8 @@ class PBSAC(SAC):
             bundle.alpha_opt = self.alpha_optimizer
         
         bundle.posterior = BlockPosterior.from_actor(
-            self.actor, rank=self.pb_rank, init_std=self.pb_init_std
+            self.actor, rank=self.pb_rank, init_std=self.pb_init_std,
+            fixed_layers_depth=self.fixed_layers_depth,
         )
         bundle.prior = BlockPrior.from_posterior(bundle.posterior)
         bundle.pb_optimizer = nnx.Optimizer(
@@ -187,7 +189,8 @@ class PBSAC(SAC):
             bundle.alpha_opt = self.alpha_optimizer
 
         bundle.posterior = BlockPosterior.from_actor(
-            self.actor, rank=self.pb_rank, init_std=self.pb_init_std
+            self.actor, rank=self.pb_rank, init_std=self.pb_init_std,
+            fixed_layers_depth=self.fixed_layers_depth,
         )
         bundle.prior = BlockPrior.from_posterior(bundle.posterior)
         bundle.pb_optimizer = nnx.Optimizer(
