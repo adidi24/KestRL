@@ -1,7 +1,6 @@
-"""Training controller for BenchRL-JAX.
+"""Training controller for KestRL.
 
 Orchestrates training loop, logging, evaluation, and checkpointing.
-Adapted from benchrl.trainers.trainer for JAX.
 """
 
 import os

@@ -1,5 +1,3 @@
-# benchrl/environments/wrappers/observation_wrappers.py
-
 import numpy as np
 import gymnasium as gym
 from collections import deque
