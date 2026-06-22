@@ -24,6 +24,7 @@ NUM_SEEDS  = 3
 _BASE_CFG = dict(
     hidden_dims           = (16,),
     activation            = "relu",
+    env_id                = ENV_NAME,
     total_timesteps       = 400,
     buffer_size           = 512,
     learning_starts       = 10,
@@ -84,8 +85,10 @@ def test_init_carry_shapes(init_carry):
     assert init_carry.global_step.shape == ()
     assert init_carry.global_step == 0
     assert init_carry.r_max == 0.0
-    assert init_carry.actor_frozen == False
     assert init_carry.pb_loss == 0.0
+    assert init_carry.pb_certified_return == 0.0
+    assert init_carry.pb_empirical_return == 0.0
+    assert init_carry.pb_uncertainty_term == 0.0
 
 
 # ── step_epoch ────────────────────────────────────────────────────────────────
@@ -95,7 +98,8 @@ EXPECTED_METRIC_KEYS = {
     'episode/return',
     'pac_bayes/loss', 'pac_bayes/kl_div',
     'pac_bayes/mean_return', 'pac_bayes/lambda',
-    'pac_bayes/mixing_time', 'pac_bayes/actor_frozen', 'pac_bayes/r_max',
+    'pac_bayes/mixing_time', 'pac_bayes/r_max',
+    'pac_bayes/certified_return', 'pac_bayes/empirical_return', 'pac_bayes/uncertainty_term',
     # autotune_alpha=True adds these
     'alpha/loss', 'alpha/value',
 }

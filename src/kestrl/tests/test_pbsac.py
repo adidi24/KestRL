@@ -229,18 +229,19 @@ def test_frozen_update_pb_posterior_changes_state():
         gd, is_discrete=False, num_samples=2
     )
 
-    new_state, metrics = update_fn(
+    # jit is required: without it, nnx.merge reuses the same Variable objects
+    # from gd, so the optimizer mutates state in-place (no functional isolation).
+    new_state, metrics = jax.jit(update_fn)(
         state, C_const=1.0, C_prime_const=0.1, batch_data=data,
         key=jax.random.PRNGKey(0),
     )
 
-    # States must differ (posterior params were updated)
-    orig_leaves = jax.tree.leaves(state)
-    new_leaves  = jax.tree.leaves(new_state)
-    any_changed = any(
-        not jnp.array_equal(o, n)
-        for o, n in zip(orig_leaves, new_leaves)
-    )
+    b_orig = nnx.merge(gd, state)
+    b_new  = nnx.merge(gd, new_state)
+    orig_p = {k: v.get_value() for k, v in nnx.to_flat_state(nnx.state(b_orig.posterior, nnx.Param))}
+    new_p  = {k: v.get_value() for k, v in nnx.to_flat_state(nnx.state(b_new.posterior, nnx.Param))}
+    assert len(orig_p) > 0, "No posterior Params found — check BlockPosterior structure"
+    any_changed = any(not jnp.array_equal(orig_p[k], new_p[k]) for k in orig_p)
     assert any_changed, "bundle_state unchanged after posterior gradient step"
     for k in ('loss', 'kl_div', 'mean_empirical_return', 'lambda'):
         assert k in metrics
@@ -300,18 +301,19 @@ def test_frozen_adaptive_continuous_update_changes_critics():
     next_obs = jax.random.normal(jax.random.PRNGKey(3), (16, OBS_DIM))
     dones    = jnp.zeros((16, 1))
 
-    new_state, metrics = update_fn(
+    new_state, metrics = jax.jit(update_fn)(
         state, obs, actions, rewards, next_obs, dones,
         gamma=0.99, key=jax.random.PRNGKey(4),
     )
     assert 'critic/loss' in metrics
     assert jnp.isfinite(metrics['critic/loss'])
 
-    orig_leaves = jax.tree.leaves(state)
-    new_leaves  = jax.tree.leaves(new_state)
-    assert any(
-        not jnp.array_equal(o, n) for o, n in zip(orig_leaves, new_leaves)
-    ), "bundle_state unchanged after adaptive critic update"
+    b_orig = nnx.merge(gd, state)
+    b_new  = nnx.merge(gd, new_state)
+    orig_p = {k: v.get_value() for k, v in nnx.to_flat_state(nnx.state(b_orig.critic1, nnx.Param))}
+    new_p  = {k: v.get_value() for k, v in nnx.to_flat_state(nnx.state(b_new.critic1, nnx.Param))}
+    assert any(not jnp.array_equal(orig_p[k], new_p[k]) for k in orig_p), \
+        "bundle_state unchanged after adaptive critic update"
 
 
 def test_frozen_adaptive_discrete_update_changes_critics():
@@ -344,15 +346,16 @@ def test_frozen_adaptive_discrete_update_changes_critics():
     next_obs = jax.random.normal(jax.random.PRNGKey(3), (B, obs_dim))
     dones    = jnp.zeros((B, 1))
 
-    new_state, metrics = update_fn(
+    new_state, metrics = jax.jit(update_fn)(
         state, obs, actions, rewards, next_obs, dones,
         gamma=0.99, key=jax.random.PRNGKey(4),
     )
     assert 'critic/loss' in metrics
-    assert any(
-        not jnp.array_equal(o, n)
-        for o, n in zip(jax.tree.leaves(state), jax.tree.leaves(new_state))
-    )
+    b_orig = nnx.merge(gd, state)
+    b_new  = nnx.merge(gd, new_state)
+    orig_p = {k: v.get_value() for k, v in nnx.to_flat_state(nnx.state(b_orig.critic1, nnx.Param))}
+    new_p  = {k: v.get_value() for k, v in nnx.to_flat_state(nnx.state(b_new.critic1, nnx.Param))}
+    assert any(not jnp.array_equal(orig_p[k], new_p[k]) for k in orig_p)
 
 
 # ── Mixing time estimation (numpy path, standard route) ──────────────────────
